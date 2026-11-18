@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CrickBex native launch screen (pre-Android 12): brand blue + centered splash-icon,
+     same as the RN expo-splash-screen config (backgroundColor #0B5CD4, imageWidth 200). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_background" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/splash_logo" />
+    </item>
+</layer-list>
