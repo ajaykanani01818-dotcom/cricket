@@ -11,11 +11,11 @@ String playingXIRoleLabel(dynamic role) {
     case 1:
       return 'Bowler';
     case 2:
-      return 'WK';
+      return 'Wicketkeeper';
     case 3:
-      return 'Batting All Rounder';
+      return 'Batting all-rounder';
     case 4:
-      return 'Bowling All Rounder';
+      return 'Bowling all-rounder';
     default:
       return 'Player';
   }
@@ -100,4 +100,56 @@ PlayingXIView parsePlayingXI(dynamic data) {
   final t1 = team('team1', 'playingXI_Team1', 'Team 1');
   final t2 = team('team2', 'playingXI_Team2', 'Team 2');
   return PlayingXIView(hasMatch: true, team1: t1, team2: t2, signature: sig.toString());
+}
+
+/// Bench / substitutes and wicketkeeper flags from GET /match/:id/squad.
+class SquadView {
+  const SquadView({this.bench1 = const [], this.bench2 = const [], this.keepers = const {}});
+  final List<XiPlayer> bench1, bench2;
+
+  /// Player keys flagged `isWicketKeeper` in the squad payload.
+  final Set<String> keepers;
+
+  static const empty = SquadView();
+
+  String get signature =>
+      '${bench1.map((p) => p.id).join(',')}|${bench2.map((p) => p.id).join(',')}|${(keepers.toList()..sort()).join(',')}';
+}
+
+SquadView parseSquad(dynamic data) {
+  final rawMatch = J.map(data)['match'];
+  if (rawMatch is! Map) return SquadView.empty;
+  final m = J.map(rawMatch);
+  final keepers = <String>{};
+  for (final k in ['playingXI_Team1', 'playingXI_Team2', 'bench_Team1', 'bench_Team2', 'substitutes_Team1', 'substitutes_Team2']) {
+    for (final p in J.maps(m[k])) {
+      if (J.boolean(p['isWicketKeeper'])) {
+        final key = J.text(p['key']);
+        if (key != null) keepers.add(key);
+      }
+    }
+  }
+  List<XiPlayer> bench(String team) {
+    final out = <XiPlayer>[];
+    for (final k in ['bench_$team', 'substitutes_$team']) {
+      final raw = J.maps(m[k]);
+      for (var i = 0; i < raw.length; i++) {
+        final p = raw[i];
+        final name = J.text(p['name']);
+        if (name == null) continue;
+        out.add(XiPlayer(
+          id: J.text(p['key']) ?? '$k-$i',
+          name: name,
+          roleLabel: playingXIRoleLabel(p['role']),
+          isCaptain: J.boolean(p['isCaptain']),
+          isWicketKeeper: J.boolean(p['isWicketKeeper']),
+          country: null,
+          avatar: J.text(p['logo']),
+        ));
+      }
+    }
+    return out;
+  }
+
+  return SquadView(bench1: bench('Team1'), bench2: bench('Team2'), keepers: keepers);
 }

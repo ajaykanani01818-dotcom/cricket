@@ -3,16 +3,12 @@ import 'package:crickbex/core/theme/app_theme.dart';
 import 'package:crickbex/core/utils/fixture_status.dart';
 import 'package:crickbex/core/utils/match_transform.dart';
 import 'package:crickbex/features/common/countdown_timer.dart';
-import 'package:crickbex/features/common/favorites.dart';
-import 'package:crickbex/features/common/hero_banner.dart';
 import 'package:crickbex/features/common/live_match_card.dart';
 import 'package:crickbex/features/common/match_parsing.dart';
 import 'package:crickbex/features/common/match_time.dart';
-import 'package:crickbex/features/common/popular_series.dart';
 import 'package:crickbex/features/common/upcoming_match_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:go_router/go_router.dart';
 
 import 'helpers.dart';
 
@@ -32,14 +28,19 @@ void main() {
   tearDown(() => MinuteClock.nowFn = DateTime.now);
 
   group('LiveMatchCard', () {
-    testWidgets('live match: blue card, LIVE badge, chase line, scores', (tester) async {
+    testWidgets('live match: raised card, Live pill, chase line, runs + overs', (tester) async {
       var taps = 0;
       await tester.pumpWidget(_wrap(LiveMatchCard(match: _match(liveMatchJson()), onTap: () => taps++)));
       expect(find.byKey(const ValueKey('common_live_badge')), findsOneWidget);
+      expect(find.text('Live'), findsOneWidget, reason: 'sentence case, once (no LIVE footer)');
+      expect(find.text('LIVE'), findsNothing);
       expect(find.text('UAE Bulls need 87 runs in 35 balls'), findsOneWidget);
-      expect(find.text('45/2 (4.1)'), findsOneWidget);
-      expect(find.text('131/1 (10.0)'), findsOneWidget);
+      expect(find.text('45/2'), findsOneWidget);
+      expect(find.text('4.1 ov'), findsOneWidget);
+      expect(find.text('131/1'), findsOneWidget);
+      expect(find.text('10.0 ov'), findsOneWidget);
       expect(find.text('T10'), findsOneWidget);
+      expect(find.byKey(const ValueKey('common_live_seam')), findsNothing, reason: 'no ball data in list items');
       await tester.tap(find.byType(LiveMatchCard));
       await tester.pump(const Duration(milliseconds: 200));
       expect(taps, 1);
@@ -49,7 +50,30 @@ void main() {
       final m = parseMatchList(fixtureJson('match_recent')['data']).first;
       await tester.pumpWidget(_wrap(LiveMatchCard(match: m, onTap: () {})));
       expect(find.byKey(const ValueKey('common_live_badge')), findsNothing);
+      expect(find.text('Result'), findsOneWidget);
       expect(find.text('UAE Bulls won by 6 wickets'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsOneWidget, reason: 'winner marked by a glyph, not colour alone');
+    });
+
+    testWidgets('seam strip shows the current over when ball data exists', (tester) async {
+      await tester.pumpWidget(_wrap(LiveMatchCard(
+        match: _match(liveMatchJson()),
+        onTap: () {},
+        fullWidth: true,
+        overBalls: const ['1', '4', 'WK', '6'],
+        overNumber: 5,
+      )));
+      expect(find.byKey(const ValueKey('common_live_seam')), findsOneWidget);
+      expect(find.text('Over 5'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('stumps: neutral chip, no red pill, no raw word', (tester) async {
+      final j = liveMatchJson()..['status'] = 'STUMPS';
+      await tester.pumpWidget(_wrap(LiveMatchCard(match: _match(j), onTap: () {}, fullWidth: true)));
+      expect(find.byKey(const ValueKey('common_live_badge')), findsNothing);
+      expect(find.text('Stumps'), findsOneWidget);
+      expect(find.text('STUMPS'), findsNothing);
     });
 
     testWidgets('missing fields degrade (no logos, names, scores) without overflow, also at 2x text', (tester) async {
@@ -78,10 +102,11 @@ void main() {
     testWidgets('upcoming: meta pills, venue, teams and countdown', (tester) async {
       final m = parseMatchList(fixtureJson('match_upcoming')['data']).first; // starts 03:30Z
       await tester.pumpWidget(_wrap(UpcomingMatchCard(match: m, onTap: () {})));
-      expect(find.text('STARTS IN'), findsOneWidget);
+      expect(find.text('Starts in'), findsOneWidget);
       expect(find.text('2h 30m'), findsOneWidget);
-      expect(find.text('VS'), findsOneWidget);
-      expect(find.text(m.series.toUpperCase()), findsOneWidget);
+      expect(find.text('v'), findsOneWidget);
+      expect(find.text(m.series), findsOneWidget, reason: 'sentence case, not upper-cased');
+      expect(find.text('LIVE'), findsNothing);
 
       // The shared minute clock drives the countdown.
       MinuteClock.nowFn = () => fixedNow.add(const Duration(minutes: 31));
@@ -93,7 +118,7 @@ void main() {
       MinuteClock.nowFn = () => fixedNow.add(const Duration(hours: 3));
       MinuteClock.instance.debugTick();
       await tester.pump();
-      expect(find.text('STARTS IN'), findsNothing);
+      expect(find.text('Starts in'), findsNothing);
     });
 
     testWidgets('completed: result pill + result row; live match shows LIVE pill', (tester) async {
@@ -101,7 +126,7 @@ void main() {
       await tester.pumpWidget(_wrap(UpcomingMatchCard(match: done, variant: UpcomingCardVariant.completed)));
       expect(find.byKey(const ValueKey('common_result_pill')), findsOneWidget);
       expect(find.byKey(const ValueKey('common_result_row')), findsOneWidget);
-      expect(find.text('STARTS IN'), findsNothing);
+      expect(find.text('Starts in'), findsNothing);
 
       await tester.pumpWidget(_wrap(UpcomingMatchCard(match: _match(liveMatchJson()))));
       expect(find.byKey(const ValueKey('common_upcoming_live_pill')), findsOneWidget);
@@ -149,79 +174,5 @@ void main() {
     expect(find.textContaining('Starts in'), findsNothing);
     await tester.pumpWidget(_wrap(const CountdownTimer(targetDate: 'garbage')));
     expect(find.textContaining('Starts in'), findsNothing);
-  });
-
-  testWidgets('FavoriteButton toggles', (tester) async {
-    var fav = false;
-    await tester.pumpWidget(_wrap(StatefulBuilder(
-      builder: (context, setState) => FavoriteButton(isFavorite: fav, onToggle: () => setState(() => fav = !fav)),
-    )));
-    expect(find.byIcon(Icons.favorite_border), findsOneWidget);
-    await tester.tap(find.byType(FavoriteButton));
-    await tester.pump();
-    expect(find.byIcon(Icons.favorite), findsOneWidget);
-  });
-
-  group('PopularSeriesQuickAction', () {
-    testWidgets('lists ongoing series, navigates to series detail, auto-collapses', (tester) async {
-      FakeApi({
-        '/series': (req) => req.url.queryParameters['status'] == 'ONGOING'
-            ? FakeApi.ok(body([
-                {'name': 'Big Bash League 2026-27', 'sb_series_key': 'BBL'},
-              ]))(req)
-            : FakeApi.ok(body([]))(req),
-        '/series/BBL': FakeApi.fixture('series_fixtures'),
-      }).install();
-      final router = GoRouter(initialLocation: '/live', routes: [
-        GoRoute(
-          path: '/live',
-          builder: (_, _) => const Scaffold(body: Stack(children: [PopularSeriesQuickAction(bottomOffset: 20)])),
-          routes: [GoRoute(path: 'series-detail/:id', builder: (_, s) => Text('series:${s.pathParameters['id']}:${s.extra}'))],
-        ),
-      ]);
-      await tester.pumpWidget(routerApp(router));
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('BBL2'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('common_quick_action_BBL')));
-      await settle(tester);
-      expect(location(router), '/live/series-detail/BBL');
-      expect(find.text('series:BBL:Big Bash League 2026-27'), findsOneWidget);
-      router.pop();
-      await tester.pump(const Duration(seconds: 1));
-      // 5s of inactivity → collapsed.
-      await tester.pump(const Duration(seconds: 6));
-      expect(find.byKey(const ValueKey('common_quick_action_open')), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('common_quick_action_open')));
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.byKey(const ValueKey('common_quick_action_collapse')), findsOneWidget);
-      await tester.pump(const Duration(seconds: 6));
-    });
-  });
-
-  group('HeroBanner', () {
-    testWidgets('renders slides, arrows and auto-advance; empty shows brand slide', (tester) async {
-      final recent = parseMatchList(fixtureJson('match_recent')['data']).take(1).toList();
-      final up = parseMatchList(fixtureJson('match_upcoming')['data']);
-      HeroSlide? tapped;
-      await tester.pumpWidget(_wrap(HeroBanner(
-        slides: buildHeroSlides([_match(liveMatchJson()), ...recent], up, const [HeroPlayer(format: 'ODI', playerKey: 'p', name: 'Shubman Gill', rating: 801, rank: 1)]),
-        onSlideTap: (s) => tapped = s,
-      )));
-      await tester.pump();
-      expect(find.text('Live Now'), findsOneWidget);
-      await tester.tap(find.text('Live Now'));
-      expect(tapped?.type, HeroSlideType.live);
-      await tester.pump(const Duration(seconds: 6));
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Result'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('common_hero_prev')));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Live Now'), findsOneWidget);
-
-      await tester.pumpWidget(_wrap(const HeroBanner(slides: [])));
-      expect(find.text('Your premium cricket destination'), findsOneWidget);
-    });
   });
 }

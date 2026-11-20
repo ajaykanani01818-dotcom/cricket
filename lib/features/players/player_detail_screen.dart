@@ -5,21 +5,27 @@ import '../../core/api/json.dart';
 import '../../core/services/cricket_services.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/empty_state.dart';
-import '../../core/widgets/net_image.dart';
-import '../../core/widgets/tabs.dart';
+import '../../core/widgets/shimmer_box.dart';
+import '../../core/widgets/titles.dart';
 import '../ads/ads.dart';
 import 'player_models.dart';
-import 'widgets/gradient_card.dart';
 import 'widgets/player_widgets.dart';
 
-/// Ported from RN `src/screens/PlayerDetailScreen.tsx`.
+/// Player profile: header facts, ICC ranks, format-wise career tables,
+/// debuts, teams and bio. Only what the provider sends is shown; there is no
+/// recent-form section because the API has no per-match player data, and no
+/// follow button (PRD §12).
 ///
-/// [initialPlayer] is the list item the user tapped (country list / ranking
-/// row). It renders the hero (and personal details) immediately while
-/// /players/:key/info loads, and stays on screen when the profile does not
-/// exist yet (API 404 "Player not found!!") instead of an error.
+/// [initialPlayer] is the list item the user tapped (country list, ranking
+/// row, trending). It renders the header immediately while
+/// `/players/:key/info` loads, and stays on screen when the full profile does
+/// not exist yet (API 404) instead of an error page.
 class PlayerDetailScreen extends StatefulWidget {
-  const PlayerDetailScreen({super.key, required this.playerKey, this.initialPlayer});
+  const PlayerDetailScreen({
+    super.key,
+    required this.playerKey,
+    this.initialPlayer,
+  });
   final String playerKey;
   final JsonMap? initialPlayer;
 
@@ -28,21 +34,15 @@ class PlayerDetailScreen extends StatefulWidget {
 }
 
 class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
-  static const heroHeight = 280.0;
-
   PlayerProfile? _initial;
-
-  /// Ranking rows only carry name/logo; country-list items also carry
-  /// dob/role/styles and can fill the Personal card before info arrives.
-  bool _initialHasPersonal = false;
   PlayerProfile? _info;
   bool _loading = false;
   Object? _error;
-  String _rankFormat = 'test';
   int _gen = 0;
-  final _scroll = ScrollController();
 
-  String get _key => widget.playerKey.trim().isNotEmpty ? widget.playerKey.trim() : (_initial?.playerKey ?? '');
+  String get _key => widget.playerKey.trim().isNotEmpty
+      ? widget.playerKey.trim()
+      : (_initial?.playerKey ?? '');
 
   @override
   void initState() {
@@ -53,8 +53,9 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
 
   void _parseInitial() {
     final ip = widget.initialPlayer;
-    _initial = ip == null || ip.isEmpty ? null : PlayerProfile.fromJson(ip, withDetails: false);
-    _initialHasPersonal = ip != null && (ip['role'] != null || ip['dob'] != null || ip['battingStyle'] != null);
+    _initial = ip == null || ip.isEmpty
+        ? null
+        : PlayerProfile.fromJson(ip, withDetails: false);
   }
 
   @override
@@ -69,9 +70,7 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
 
   @override
   void dispose() {
-    // RN useRecordDetailExit.
     AdsManager.instance.recordDetailExit();
-    _scroll.dispose();
     super.dispose();
   }
 
@@ -104,19 +103,20 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
     }
   }
 
-  bool get _notFound => _error is ApiException && (_error as ApiException).isNotFound;
+  bool get _notFound =>
+      _error is ApiException && (_error as ApiException).isNotFound;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.bg,
-      child: SafeArea(
-        bottom: false,
-        child: Column(children: [
+      color: context.palette.canvas,
+      child: Column(
+        children: [
+          const ScreenTitle(title: 'Player profile'),
           const ScreenBannerSlots(screen: 'player_detail', onlyPosition: 'top'),
           Expanded(child: _body()),
           const FixedBottomBanner(screen: 'player_detail'),
-        ]),
+        ],
       ),
     );
   }
@@ -125,17 +125,23 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
     final p = _info ?? _initial;
     if (_key.isEmpty && p == null) {
       return const Center(
-        child: EmptyState(key: ValueKey('player_detail_not_found'), icon: Icons.person_off_outlined, title: 'Player not found'),
+        child: SingleChildScrollView(
+          child: EmptyState(
+            key: ValueKey('player_detail_not_found'),
+            icon: Icons.person_off_outlined,
+            title: 'Player not found',
+            subtitle:
+                'This link does not point to a player. Go back and pick one from the list.',
+          ),
+        ),
       );
     }
 
-    // Nothing to show in the header yet → RN full-page shimmer.
     if (p == null) {
       if (_loading || (_error == null && _info == null)) {
-        return SingleChildScrollView(
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.only(bottom: bottomReserve(context)),
-          child: const PlayerDetailShimmer(),
+        return const SingleChildScrollView(
+          physics: NeverScrollableScrollPhysics(),
+          child: Capped(child: PlayerDetailSkeleton()),
         );
       }
       return Center(
@@ -144,224 +150,516 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
               ? const EmptyState(
                   key: ValueKey('player_detail_not_found'),
                   icon: Icons.person_off_outlined,
-                  title: 'Player not found',
-                  subtitle: "This player's profile isn't available yet.",
+                  title: 'No profile for this player yet',
+                  subtitle:
+                      'The data provider has not published it. Go back and pick another player.',
                 )
-              : ErrorRetry(key: const ValueKey('player_detail_error'), message: friendlyError(_error!), onRetry: _fetch),
+              : ErrorRetry(
+                  key: const ValueKey('player_detail_error'),
+                  title: "Profile didn't load",
+                  message: friendlyError(_error!),
+                  onRetry: _fetch,
+                ),
         ),
       );
     }
 
-    final showPersonal = _info != null || _initialHasPersonal;
-    final sections = <Widget>[
-      if (showPersonal) ...[
-        const DetailSectionLabel('Personal'),
-        _wrap(StatCard(rows: [
-          StatLine('Born', p.bornText),
-          StatLine('Age', p.ageText),
-          StatLine('Batting', p.battingText),
-          StatLine('Bowling', p.bowlingText),
-          StatLine('Role', p.roleText),
-        ])),
+    final info = _info;
+    return ListView(
+      key: const ValueKey('player_detail_scroll'),
+      padding: const EdgeInsets.only(bottom: Spacing.xxxl),
+      children: [
+        Capped(child: _Header(player: p)),
+        if (info == null)
+          if (_loading || _error == null)
+            const Capped(child: PlayerDetailSkeleton(showHeader: false))
+          else
+            Capped(child: _statusBlock())
+        else
+          ..._details(info).map((w) => Capped(child: w)),
       ],
-    ];
-
-    if (_info == null) {
-      if (_loading || _error == null) {
-        sections.add(PlayerDetailShimmer(showHero: false, showPersonal: !showPersonal));
-      } else {
-        sections.add(_statusCard());
-      }
-    } else {
-      sections.addAll(_infoSections(_info!));
-    }
-
-    return Stack(children: [
-      Positioned(
-        top: 0,
-        left: 0,
-        right: 0,
-        height: heroHeight,
-        child: IgnorePointer(child: _ParallaxHero(controller: _scroll, height: heroHeight, player: p)),
-      ),
-      ListView(
-        key: const ValueKey('player_detail_scroll'),
-        controller: _scroll,
-        padding: EdgeInsets.only(bottom: bottomReserve(context, 24)),
-        children: [
-          const SizedBox(height: heroHeight),
-          ...sections,
-          const SizedBox(height: 32),
-        ],
-      ),
-    ]);
-  }
-
-  Widget _wrap(Widget child) => Padding(
-        padding: const EdgeInsets.fromLTRB(Spacing.lg, 0, Spacing.lg, Spacing.xs),
-        child: child,
-      );
-
-  /// Shown under the header when the info request failed.
-  Widget _statusCard() {
-    final notFound = _notFound;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Spacing.lg, 26, Spacing.lg, 0),
-      child: GradientCard(
-        key: ValueKey(notFound ? 'player_detail_not_found' : 'player_detail_error'),
-        padding: const EdgeInsets.symmetric(vertical: 28, horizontal: Spacing.xxl),
-        child: Column(children: [
-          Icon(notFound ? Icons.person_search_outlined : Icons.cloud_off_outlined, size: 28, color: AppColors.textMuted),
-          const SizedBox(height: Spacing.md),
-          Text(
-            notFound ? 'Detailed profile not available yet' : friendlyError(_error!),
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: notFound ? FontWeight.w700 : FontWeight.w400,
-              color: notFound ? AppColors.text : AppColors.error,
-            ),
-          ),
-          if (notFound) ...[
-            const SizedBox(height: Spacing.xs),
-            const Text('Stats, rankings and bio for this player will appear here once available.',
-                textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4)),
-          ] else ...[
-            const SizedBox(height: 14),
-            TryAgainButton(key: const ValueKey('player_detail_retry'), onPressed: _fetch),
-          ],
-        ]),
-      ),
     );
   }
 
-  List<Widget> _infoSections(PlayerProfile info) {
+  /// Under the header when the profile request failed.
+  Widget _statusBlock() {
+    if (_notFound) {
+      return const EmptyState(
+        key: ValueKey('player_detail_not_found'),
+        icon: Icons.person_search_outlined,
+        title: 'Career stats not available yet',
+        subtitle:
+            'The data provider has not published a full profile for this player. Check back later.',
+      );
+    }
+    return EmptyState(
+      key: const ValueKey('player_detail_error'),
+      icon: Icons.cloud_off_outlined,
+      title: "Career stats didn't load",
+      subtitle: friendlyError(_error!),
+      hint: 'Check your connection, then try again.',
+      actionLabel: 'Try again',
+      onAction: _fetch,
+    );
+  }
+
+  List<Widget> _details(PlayerProfile info) {
+    final pad = const EdgeInsets.symmetric(horizontal: Spacing.lg);
     final ranks = info.ranks;
     return [
       if (ranks != null) ...[
-        const DetailSectionLabel('ICC Rankings'),
-        _wrap(Column(children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: Spacing.md),
-            child: SegmentedControl<String>(
-              key: const ValueKey('player_detail_rank_format'),
-              compact: true,
-              options: const [SegmentOption('test', 'Test'), SegmentOption('odi', 'ODI'), SegmentOption('t20', 'T20')],
-              value: _rankFormat,
-              onChanged: (v) => setState(() => _rankFormat = v),
-            ),
-          ),
-          StatCard(rows: [
-            StatLine('Batting', ranks.rank('batting', _rankFormat)),
-            StatLine('Bowling', ranks.rank('bowling', _rankFormat)),
-            StatLine('All-rounder', ranks.rank('all', _rankFormat)),
-          ]),
-        ])),
+        const PageSectionTitle('ICC rankings'),
+        Padding(
+          padding: pad,
+          child: _RanksTable(ranks: ranks),
+        ),
       ],
       const Padding(
-        padding: EdgeInsets.fromLTRB(Spacing.lg, 18, Spacing.lg, 0),
+        padding: EdgeInsets.fromLTRB(Spacing.lg, Spacing.lg, Spacing.lg, 0),
         child: ListNativeAd(placement: 'player_detail_feed'),
       ),
-      if (info.batting.isNotEmpty) ...[
-        const DetailSectionLabel('Batting Stats'),
-        for (final b in info.batting) _formatBlock(b),
+      if (!info.battingTable.isEmpty) ...[
+        const PageSectionTitle('Batting career'),
+        Padding(
+          padding: pad,
+          child: CareerTableView(
+            key: const ValueKey('player_batting_table'),
+            scrollKey: const ValueKey('player_batting_scroll'),
+            title: 'Batting',
+            table: info.battingTable,
+          ),
+        ),
+        _legend(info.battingTable.legend),
       ],
-      if (info.bowling.isNotEmpty) ...[
-        const DetailSectionLabel('Bowling Stats'),
-        for (final b in info.bowling) _formatBlock(b),
+      if (!info.bowlingTable.isEmpty) ...[
+        const PageSectionTitle('Bowling career'),
+        Padding(
+          padding: pad,
+          child: CareerTableView(
+            key: const ValueKey('player_bowling_table'),
+            scrollKey: const ValueKey('player_bowling_scroll'),
+            title: 'Bowling',
+            table: info.bowlingTable,
+          ),
+        ),
+        _legend(info.bowlingTable.legend),
+      ],
+      if (info.battingTable.isEmpty && info.bowlingTable.isEmpty)
+        const EmptyState(
+          key: ValueKey('player_detail_no_stats'),
+          icon: Icons.table_chart_outlined,
+          title: 'No career stats published yet',
+          subtitle: 'Stats appear here once the data provider adds them.',
+        ),
+      if (info.debuts.isNotEmpty) ...[
+        const PageSectionTitle('Debuts'),
+        Padding(
+          padding: pad,
+          child: _Debuts(debuts: info.debuts),
+        ),
       ],
       if (info.teams.isNotEmpty) ...[
-        const DetailSectionLabel('Teams'),
-        _wrap(TeamsCard(teams: info.teams)),
+        const PageSectionTitle('Teams'),
+        Padding(
+          padding: pad,
+          child: _Teams(teams: info.teams),
+        ),
       ],
       if (info.description.isNotEmpty) ...[
-        const DetailSectionLabel('About'),
-        _wrap(GradientCard(
-          padding: const EdgeInsets.symmetric(vertical: Spacing.lg, horizontal: 18),
-          child: SizedBox(
-            width: double.infinity,
-            child: Text(info.description,
-                style: const TextStyle(fontSize: 13, color: AppColors.graphite, height: 20 / 13, letterSpacing: 0.1)),
-          ),
-        )),
+        const PageSectionTitle('About'),
+        Padding(
+          padding: pad,
+          child: _Bio(text: info.description),
+        ),
       ],
     ];
   }
 
-  Widget _formatBlock(FormatStats f) => _wrap(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(Spacing.xs, 0, Spacing.xs, Spacing.sm),
-          child: Text(f.name.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.graphite, letterSpacing: 0.5)),
-        ),
-        StatCard(rows: f.rows),
-      ]));
+  Widget _legend(String text) => Padding(
+    padding: const EdgeInsets.fromLTRB(Spacing.lg, Spacing.sm, Spacing.lg, 0),
+    child: Text(text, style: AppText.meta),
+  );
 }
 
-/// Hero that fades / scales / drifts up as the content scrolls over it
-/// (RN Animated parallax). Only this widget rebuilds on scroll.
-class _ParallaxHero extends StatelessWidget {
-  const _ParallaxHero({required this.controller, required this.height, required this.player});
-  final ScrollController controller;
-  final double height;
+class _Header extends StatelessWidget {
+  const _Header({required this.player});
   final PlayerProfile player;
 
   @override
   Widget build(BuildContext context) {
-    final hero = ColoredBox(
-      color: AppColors.bg,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(Spacing.xxxl, Spacing.xxl, Spacing.xxxl, Spacing.lg),
-        child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
-          Container(
-            width: 128,
-            height: 128,
-            margin: const EdgeInsets.only(bottom: Spacing.lg),
-            padding: const EdgeInsets.all(Spacing.xs),
-            decoration: BoxDecoration(
-              color: AppColors.white,
-              shape: BoxShape.circle,
-              border: Border.all(color: AppColors.borderStrong),
-            ),
-            child: NetImage(url: player.logo, size: 118, fallbackLetter: player.initial, fit: BoxFit.cover, background: AppColors.cardAlt),
+    final p = context.palette;
+    final facts = player.facts;
+    return Container(
+      decoration: BoxDecoration(
+        color: p.surface,
+        border: Border(bottom: BorderSide(color: p.hairline)),
+      ),
+      padding: const EdgeInsets.fromLTRB(
+        Spacing.lg,
+        Spacing.xl,
+        Spacing.lg,
+        Spacing.xl,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              PlayerAvatar(url: player.logo, name: player.name, size: 72),
+              const SizedBox(width: Spacing.lg),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        player.name,
+                        key: const ValueKey('player_detail_name'),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppFont.style(
+                          size: 26,
+                          weight: FontWeight.w800,
+                          height: 1.1,
+                          color: p.ink,
+                        ),
+                      ),
+                    ),
+                    if (player.country.isNotEmpty) ...[
+                      const SizedBox(height: Spacing.xs),
+                      Text(
+                        player.country,
+                        style: AppText.meta.copyWith(fontSize: 14),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
           ),
-          Text(player.name,
-              key: const ValueKey('player_detail_name'),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: AppColors.text, letterSpacing: -0.6, height: 1.15)),
-          const SizedBox(height: Spacing.xs),
-          Text(player.meta,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textSecondary, letterSpacing: 0.2)),
-          const SizedBox(height: 10),
-          Container(width: 24, height: 2, decoration: BoxDecoration(color: AppColors.pitch, borderRadius: BorderRadius.circular(1))),
-        ]),
+          if (facts.isNotEmpty) ...[
+            const SizedBox(height: Spacing.lg),
+            LayoutBuilder(
+              builder: (context, c) {
+                final cols = c.maxWidth >= 560 ? 3 : 2;
+                const gap = Spacing.lg;
+                final w = ((c.maxWidth - gap * (cols - 1)) / cols)
+                    .floorToDouble();
+                return Wrap(
+                  spacing: gap,
+                  runSpacing: Spacing.md,
+                  children: [
+                    for (final f in facts)
+                      SizedBox(
+                        width: w,
+                        child: MergeSemantics(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(f.$1, style: AppText.small),
+                              const SizedBox(height: 2),
+                              Text(f.$2, style: AppText.name),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ],
       ),
     );
+  }
+}
 
-    return AnimatedBuilder(
-      animation: controller,
-      child: hero,
-      builder: (context, child) {
-        final y = controller.hasClients && controller.positions.length == 1 ? controller.offset : 0.0;
-        final opacity = y <= 0
-            ? 1.0
-            : y < height * 0.5
-                ? 1 - 0.45 * (y / (height * 0.5))
-                : (0.55 * (1 - ((y - height * 0.5) / (height * 0.35)))).clamp(0.0, 0.55);
-        final scale = y < 0 ? (1 + 0.15 * (-y / height)).clamp(1.0, 1.15) : (1 - 0.12 * (y / height)).clamp(0.88, 1.0);
-        final dy = -(y.clamp(0.0, height)) * 0.4;
-        if (opacity <= 0) return const SizedBox.shrink();
-        return Opacity(
-          opacity: opacity,
-          child: Transform.translate(offset: Offset(0, dy), child: Transform.scale(scale: scale, child: child)),
+/// Category × format grid; categories with no rank in any format are left
+/// out, single missing cells show a dash.
+class _RanksTable extends StatelessWidget {
+  const _RanksTable({required this.ranks});
+  final IccRanks ranks;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final cats = IccRanks.categories
+        .where((c) => ranks.hasCategory(c.$1))
+        .toList();
+    Widget pad(Widget w, {bool right = true}) => Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Spacing.md,
+        vertical: Spacing.md,
+      ),
+      child: Align(
+        alignment: right ? Alignment.centerRight : Alignment.centerLeft,
+        child: w,
+      ),
+    );
+    final numStyle = AppFont.style(
+      size: 17,
+      weight: FontWeight.w800,
+      width: AppFont.scoreWidth,
+      color: p.ink,
+      tabularFigures: true,
+    );
+    return Container(
+      key: const ValueKey('player_ranks_table'),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: p.hairline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Table(
+        columnWidths: const {0: FlexColumnWidth(1.6)},
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        children: [
+          TableRow(
+            decoration: BoxDecoration(color: p.surfaceAlt),
+            children: [
+              pad(Text('Category', style: AppText.small), right: false),
+              for (final f in IccRanks.formats)
+                pad(Text(f.$2, style: AppText.small)),
+            ],
+          ),
+          for (final c in cats)
+            TableRow(
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: p.hairline)),
+              ),
+              children: [
+                pad(Text(c.$2, style: AppText.name), right: false),
+                for (final f in IccRanks.formats)
+                  pad(
+                    Semantics(
+                      label: ranks.rank(c.$1, f.$1) == null
+                          ? '${f.$2} ${c.$2.toLowerCase()}: not ranked'
+                          : '${f.$2} ${c.$2.toLowerCase()} rank ${ranks.rank(c.$1, f.$1)!.substring(1)}',
+                      excludeSemantics: true,
+                      child: Text(
+                        ranks.rank(c.$1, f.$1) ?? kDash,
+                        style: ranks.rank(c.$1, f.$1) == null
+                            ? numStyle.copyWith(color: p.inkMuted)
+                            : numStyle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Debuts extends StatelessWidget {
+  const _Debuts({required this.debuts});
+  final List<Debut> debuts;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final ts = MediaQuery.textScalerOf(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: p.hairline),
+      ),
+      child: Column(
+        children: [
+          for (var i = 0; i < debuts.length; i++)
+            Container(
+              decoration: BoxDecoration(
+                border: i == 0
+                    ? null
+                    : Border(top: BorderSide(color: p.hairline)),
+              ),
+              padding: const EdgeInsets.symmetric(
+                horizontal: Spacing.lg,
+                vertical: Spacing.md,
+              ),
+              child: MergeSemantics(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: ts.scale(64).clamp(64.0, 120.0),
+                      child: Text(debuts[i].format, style: AppText.name),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (debuts[i].match != null)
+                            Text(
+                              debuts[i].match!,
+                              style: AppText.reading.copyWith(fontSize: 14),
+                            ),
+                          if (debuts[i].date != null)
+                            Text(debuts[i].date!, style: AppText.meta),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Teams extends StatelessWidget {
+  const _Teams({required this.teams});
+  final List<String> teams;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Wrap(
+      spacing: Spacing.sm,
+      runSpacing: Spacing.sm,
+      children: [
+        for (final t in teams)
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Spacing.md,
+              vertical: 6,
+            ),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(Radii.chip),
+              border: Border.all(color: p.hairline),
+            ),
+            child: Text(t, style: AppText.name.copyWith(fontSize: 14)),
+          ),
+      ],
+    );
+  }
+}
+
+/// Bio collapsed to 4 lines with a "Show more" toggle when it is longer.
+class _Bio extends StatefulWidget {
+  const _Bio({required this.text});
+  final String text;
+
+  @override
+  State<_Bio> createState() => _BioState();
+}
+
+class _BioState extends State<_Bio> {
+  static const _lines = 4;
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = AppText.reading;
+    return LayoutBuilder(
+      builder: (context, c) {
+        final tp = TextPainter(
+          text: TextSpan(text: widget.text, style: style),
+          maxLines: _lines,
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: c.maxWidth < 640 ? c.maxWidth : 640);
+        final long = tp.didExceedMaxLines;
+        tp.dispose();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: Text(
+                widget.text,
+                key: const ValueKey('player_bio'),
+                maxLines: _open ? null : _lines,
+                overflow: _open ? null : TextOverflow.ellipsis,
+                style: style,
+              ),
+            ),
+            if (long)
+              TextButton(
+                key: const ValueKey('player_bio_toggle'),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(48, 44),
+                ),
+                onPressed: () => setState(() => _open = !_open),
+                child: Text(_open ? 'Show less' : 'Show more'),
+              ),
+          ],
         );
       },
+    );
+  }
+}
+
+/// Skeleton mirroring the profile. [showHeader] false when the real header
+/// (from the list item) is already on screen.
+class PlayerDetailSkeleton extends StatelessWidget {
+  const PlayerDetailSkeleton({super.key, this.showHeader = true});
+  final bool showHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    Widget block(double h) => Container(
+      height: h,
+      margin: const EdgeInsets.symmetric(horizontal: Spacing.lg),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: p.hairline),
+      ),
+    );
+    Widget title(double w) => Padding(
+      padding: const EdgeInsets.fromLTRB(
+        Spacing.lg,
+        Spacing.xxl,
+        Spacing.lg,
+        Spacing.sm,
+      ),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: ShimmerBox(width: w, height: 16, radius: 4),
+      ),
+    );
+    return ShimmerGroup(
+      key: const ValueKey('player_detail_shimmer'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showHeader)
+            Container(
+              color: p.surface,
+              padding: const EdgeInsets.all(Spacing.xl),
+              child: const Row(
+                children: [
+                  ShimmerBox(width: 72, height: 72, radius: 36),
+                  SizedBox(width: Spacing.lg),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ShimmerBox(width: 180, height: 22, radius: 4),
+                        SizedBox(height: 8),
+                        ShimmerBox(width: 90, height: 13, radius: 4),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          title(110),
+          block(132),
+          title(130),
+          block(220),
+        ],
+      ),
     );
   }
 }

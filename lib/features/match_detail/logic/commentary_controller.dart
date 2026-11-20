@@ -9,15 +9,19 @@ import 'match_detail_logic.dart';
 /// widget so switching tabs does not drop loaded pages or refetch.
 ///  - first page on [ensureLoaded], then "Load more" appends (deduped);
 ///  - never issues two requests for the same page;
-///  - while live, a silent page-1 refresh every 20s, but only while the user
-///    is still on page 1 (a page-1 replace would wipe their loaded pages).
+///  - while live, a silent page-1 refresh merges new balls in front of the
+///    loaded pages (deduped by innings + over + ball + timestamp);
+///  - scroll-position rule (PRD §8.4): while [holdNew] is on (the user has
+///    scrolled into the feed) new balls are held back and counted in
+///    [pendingCount]; [showPending] applies them (the screen then scrolls to
+///    the top of the feed), so a refresh never moves what the user reads.
 class CommentaryController extends ChangeNotifier {
   CommentaryController({
     required this.matchId,
     required this.service,
     required ValueListenable<bool> visibility,
     this.pageSize = commentaryPageSize,
-    Duration pollInterval = const Duration(seconds: 20),
+    Duration pollInterval = const Duration(seconds: 10),
   }) {
     _poller = Poller(interval: pollInterval, task: () => _loadFirst(silent: true), visibility: visibility);
   }
@@ -44,6 +48,13 @@ class CommentaryController extends ChangeNotifier {
   List<CommentaryBall> visible = const []; // filtered ∩ ball-with-commentary
   List<String> teams = const [];
 
+  /// See class doc.
+  bool holdNew = false;
+
+  /// New deliveries waiting behind the "N new balls" pill.
+  int pendingCount = 0;
+  CommentaryPage? _pending;
+
   bool _inFlight = false;
   int _gen = 0;
   bool _disposed = false;
@@ -64,8 +75,6 @@ class CommentaryController extends ChangeNotifier {
 
   Future<void> _loadFirst({required bool silent}) async {
     if (_inFlight || _disposed) return;
-    // Skip the poll once the user has loaded further pages.
-    if (silent && page != 1) return;
     _inFlight = true;
     final gen = ++_gen;
     if (!silent) {
@@ -77,13 +86,22 @@ class CommentaryController extends ChangeNotifier {
       final res = await service.getMatchCommentary(matchId, page: 1, perPage: pageSize);
       if (_disposed || gen != _gen) return;
       final p = CommentaryPage.fromJson(res.dataMap);
-      if (silent && page != 1) return;
-      firstPage = p;
-      balls = mergeCommentary(const [], p.balls);
-      page = 1;
-      hasMore = commentaryHasMore(received: p.balls.length, page: 1, totalCount: p.totalCount, pageSize: pageSize);
-      error = null;
-      _recompute();
+      if (silent && balls.isNotEmpty) {
+        final known = {for (final b in balls) b.key};
+        final fresh = p.balls.where((b) => !known.contains(b.key)).toList();
+        if (fresh.isEmpty) {
+          _pending = null;
+          pendingCount = 0;
+          return; // unchanged: no rebuild
+        }
+        if (holdNew) {
+          _pending = p;
+          pendingCount = fresh.where((b) => b.type == 'ball').length;
+          if (pendingCount == 0) pendingCount = fresh.length;
+          return;
+        }
+      }
+      _apply(p);
     } catch (e) {
       if (_disposed || gen != _gen) return;
       if (e is ApiException && e.isNotFound) {
@@ -103,6 +121,37 @@ class CommentaryController extends ChangeNotifier {
         _notify();
       }
     }
+  }
+
+  void _apply(CommentaryPage p) {
+    firstPage = p;
+    _pending = null;
+    pendingCount = 0;
+    if (page > 1 && balls.isNotEmpty) {
+      // Keep loaded pages: new page-1 items go in front.
+      balls = mergeCommentary(p.balls, balls);
+    } else {
+      balls = mergeCommentary(const [], p.balls);
+      page = 1;
+      hasMore = commentaryHasMore(received: p.balls.length, page: 1, totalCount: p.totalCount, pageSize: pageSize);
+    }
+    error = null;
+    _recompute();
+  }
+
+  /// Applies held-back balls (the "N new balls" pill).
+  void showPending() {
+    final p = _pending;
+    if (p == null || _disposed) return;
+    _apply(p);
+    _notify();
+  }
+
+  /// The screen reports whether the user is reading further down the feed.
+  void setHold(bool hold) {
+    if (hold == holdNew) return;
+    holdNew = hold;
+    if (!hold && _pending != null) showPending();
   }
 
   Future<void> loadMore() async {
@@ -156,7 +205,9 @@ class CommentaryController extends ChangeNotifier {
   void _recompute() {
     teams = uniqueInningsKeys(balls);
     filtered = filterCommentary(balls, team: team, filter: filter);
-    visible = filtered.where((b) => b.isBallWithCommentary).toList(growable: false);
+    visible = filtered
+        .where((b) => b.isBallWithCommentary || (filter == CommentaryFilter.all && b.isInfo))
+        .toList(growable: false);
   }
 
   void _notify() {

@@ -118,7 +118,12 @@ class AdsConfig {
   }
 
   /// When false: no AdMob init, no ad requests.
-  bool masterEnabled = true;
+  /// TEMPORARILY DISABLED: all ads off until the owner asks to re-enable.
+  /// Remote config cannot turn this back on while [adsHardDisabled] is true.
+  /// A plain static (not const) only so tests can switch it off; the
+  /// production value stays true.
+  static bool adsHardDisabled = true;
+  bool masterEnabled = !adsHardDisabled;
 
   bool bannerEnabled = true;
   int bannerRefreshSeconds = 30;
@@ -185,7 +190,7 @@ class AdsConfig {
     if (parsed is! Map) return false;
     final src = parsed;
 
-    if (src['ads_master_enabled'] is bool) masterEnabled = src['ads_master_enabled'] as bool;
+    if (!adsHardDisabled && src['ads_master_enabled'] is bool) masterEnabled = src['ads_master_enabled'] as bool;
 
     final b = src['banner'];
     if (b is Map) {

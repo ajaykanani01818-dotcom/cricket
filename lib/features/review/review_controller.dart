@@ -6,120 +6,171 @@ import 'package:flutter/widgets.dart';
 import 'package:in_app_review/in_app_review.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/brand/brand.dart';
 import 'review_storage.dart';
 
-/// Play Store listing with the reviews section expanded (RN PLAY_STORE_URL).
-const playStoreUrl = 'https://play.google.com/store/apps/details?id=com.crickbex.dark&showAllReviews=true';
+/// Store page for "Rate Cric Ticker" in Settings: the App Store listing when
+/// its id is known, else App Store search on iOS, else the Play listing.
+Uri storeListingUri({TargetPlatform? platform}) {
+  final p = platform ?? defaultTargetPlatform;
+  if (!kIsWeb && p == TargetPlatform.iOS) {
+    final id = Brand.appStoreId;
+    return Uri.parse(
+      id == null
+          ? Brand.appStoreSearchUrl
+          : 'https://apps.apple.com/app/id$id?action=write-review',
+    );
+  }
+  return Uri.parse(Brand.playStoreUrl);
+}
 
-/// iOS: search until a fixed App Store ID exists (RN IOS_STORE_SEARCH_URL).
-const iosStoreSearchUrl = 'https://apps.apple.com/search?term=CrickBex&entity=software';
-
-/// Opens the store listing: in_app_review first, falling back to the URL.
+/// Opens the store listing in the store app (or the browser on web).
 Future<bool> defaultOpenStoreListing() async {
   try {
-    await InAppReview.instance.openStoreListing();
-    return true;
-  } catch (_) {
-    // fall through to the plain URL
-  }
-  try {
-    final url = Uri.parse(defaultTargetPlatform == TargetPlatform.iOS ? iosStoreSearchUrl : playStoreUrl);
-    return await launchUrl(url, mode: LaunchMode.externalApplication);
+    return await launchUrl(
+      storeListingUri(),
+      mode: LaunchMode.externalApplication,
+    );
   } catch (_) {
     return false;
   }
 }
 
-/// Review prompt state — ported from RN `ReviewContext`.
+/// Asks the OS for its native rating sheet. The OS decides whether it is
+/// shown (Play quota, iOS max 3 per year), so this never promises a sheet.
+Future<bool> defaultRequestReview() async {
+  if (kIsWeb) return false; // in_app_review has no web implementation
+  try {
+    final r = InAppReview.instance;
+    if (!await r.isAvailable()) return false;
+    await r.requestReview();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Review prompt policy. No custom star dialog and no sentiment gating: when
+/// [ReviewRules] allow it, the app calls the system review API directly, and
+/// Settings has an always-visible "Rate Cric Ticker" row that opens the store.
 class ReviewController extends ChangeNotifier {
   ReviewController({
     ReviewStore? store,
+    Future<bool> Function()? requestReview,
     Future<bool> Function()? openStoreListing,
     VoidCallback? exitApp,
-    this.autoPromptDelay = const Duration(seconds: 2),
-  })  : store = store ?? ReviewStore(),
-        _openStore = openStoreListing ?? defaultOpenStoreListing,
-        _exitApp = exitApp ?? (() => SystemNavigator.pop());
+    this.promptDelay = const Duration(seconds: 2),
+    DateTime Function()? clock,
+  }) : store = store ?? ReviewStore(),
+       _requestReview = requestReview ?? defaultRequestReview,
+       _openStore = openStoreListing ?? defaultOpenStoreListing,
+       _exitApp = exitApp ?? (() => SystemNavigator.pop()),
+       _clock = clock ?? DateTime.now;
 
   final ReviewStore store;
+  final Future<bool> Function() _requestReview;
   final Future<bool> Function() _openStore;
   final VoidCallback _exitApp;
-  final Duration autoPromptDelay;
+  final DateTime Function() _clock;
 
-  bool _visible = false;
-  bool _openedFromExit = false;
+  /// Pause between the positive moment and the request, so the sheet never
+  /// lands on top of a tap.
+  final Duration promptDelay;
+
   bool _sessionRecorded = false;
-  bool _autoPromptScheduled = false;
+  bool _askedThisRun = false;
   bool _disposed = false;
-  Timer? _autoPromptTimer;
+  Timer? _promptTimer;
+  DateTime? _lastRootBack;
+  int _exitHintTick = 0;
 
-  bool get ratingModalVisible => _visible;
+  /// True once a review was requested in this app run.
+  bool get askedThisRun => _askedThisRun;
 
-  /// True when opened from Android back at the root — modal adds "Exit app".
-  bool get openedFromExit => _openedFromExit;
+  /// Bumped when "Press back again to exit" should be shown (ReviewHost).
+  int get exitHintTick => _exitHintTick;
 
-  void _set({required bool visible, required bool fromExit}) {
-    if (_disposed) return;
-    _visible = visible;
-    _openedFromExit = fromExit;
-    notifyListeners();
-  }
-
-  /// Records one session per app launch (main app visible).
+  /// Records one session per app launch.
   Future<void> recordSessionOnce() async {
     if (_sessionRecorded) return;
     _sessionRecorded = true;
     await store.recordSession();
   }
 
-  void showRatingModal() => _set(visible: true, fromExit: false);
-
-  void showRatingModalForExit() => _set(visible: true, fromExit: true);
-
-  void closeRatingModal() => _set(visible: false, fromExit: false);
-
-  void exitApp() {
-    closeRatingModal();
-    _exitApp();
-  }
-
+  /// One match view (counts towards [ReviewRules.minMeaningfulActions]).
   Future<void> recordMeaningfulAction() => store.recordMeaningfulAction();
 
-  /// Auto prompt (once per app run) after a short pause, when eligible.
-  Future<void> requestReviewIfAppropriate() async {
-    if (_autoPromptScheduled) return;
-    _autoPromptScheduled = true;
-    final canAsk = await store.canAsk();
-    if (!canAsk || _disposed) return;
-    _autoPromptTimer?.cancel();
-    // Show after a short delay so we don't interrupt right after a tap.
-    _autoPromptTimer = Timer(autoPromptDelay, () {
-      _autoPromptTimer = null;
-      showRatingModal();
+  /// Requests the system review sheet after [promptDelay] when the user has
+  /// just had a [positiveMoment] (e.g. viewed a completed match) and
+  /// [ReviewRules] allow it. Without a positive moment this does nothing:
+  /// merely opening a match is not a reason to ask.
+  ///
+  /// Returns true when a request was scheduled.
+  Future<bool> requestReviewIfAppropriate({bool positiveMoment = false}) async {
+    if (!positiveMoment || _askedThisRun || _disposed) return false;
+    final ok = await store.canAsk(
+      positiveMoment: positiveMoment,
+      askedThisRun: _askedThisRun,
+    );
+    if (!ok || _disposed || _askedThisRun) return false;
+    _askedThisRun = true;
+    _promptTimer?.cancel();
+    _promptTimer = Timer(promptDelay, () async {
+      _promptTimer = null;
+      if (_disposed) return;
+      try {
+        if (await _requestReview()) await store.recordReviewRequested();
+      } catch (_) {}
     });
+    return true;
   }
 
-  /// 3–5 stars: open the store listing and remember the request (cooldown).
-  Future<void> openStoreListing() async {
+  /// Settings "Rate Cric Ticker": opens the store listing (always available,
+  /// for every user). Returns false when nothing could open it.
+  Future<bool> openStoreListing() async {
     try {
-      final ok = await _openStore();
-      if (ok) await store.recordReviewRequested();
-    } catch (_) {}
+      return await _openStore();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Android back on the Home root. Never shows a rating prompt: first press
+  /// asks for "Press back again to exit" ([exitHintTick]), a second press
+  /// within 2 s exits.
+  ///
+  /// (Name kept for `AppShell`, which calls it at the Home root.)
+  void showRatingModalForExit() {
+    if (_disposed) return;
+    final now = _clock();
+    final last = _lastRootBack;
+    if (last != null && now.difference(last) < const Duration(seconds: 2)) {
+      _lastRootBack = null;
+      _exitApp();
+      return;
+    }
+    _lastRootBack = now;
+    _exitHintTick++;
+    notifyListeners();
   }
 
   @override
   void dispose() {
     _disposed = true;
-    _autoPromptTimer?.cancel();
+    _promptTimer?.cancel();
     super.dispose();
   }
 }
 
-/// Exposes the [ReviewController] (RN `useReviewOptional`).
+/// Exposes the [ReviewController].
 class ReviewScope extends InheritedNotifier<ReviewController> {
-  const ReviewScope({super.key, required ReviewController controller, required super.child}) : super(notifier: controller);
+  const ReviewScope({
+    super.key,
+    required ReviewController controller,
+    required super.child,
+  }) : super(notifier: controller);
 
-  /// Null when no review host is mounted (RN `useReviewOptional`).
+  /// Null when no review host is mounted.
   static ReviewController? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<ReviewScope>()?.notifier;
 

@@ -6,24 +6,34 @@ import '../../../core/widgets/async_value.dart';
 import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/net_image.dart';
 import '../../../core/widgets/shimmer_box.dart';
+import '../widgets/md_ui.dart';
 import 'tab_common.dart';
 import 'tab_playing_xi_parse.dart';
 
-/// Ported from RN `MatchPlayingXITab`. Loads GET /match/:id/playing11 itself
-/// and re-polls silently every 15s while [isLive].
+/// Playing XI + bench (Info tab). Loads /match/:id/playing11 and
+/// /match/:id/squad (the squad adds the bench and wicketkeeper flags; its
+/// failure is tolerated) and re-polls slowly while live. Captain and
+/// wicketkeeper are text tags. Teams sit side by side on wide screens.
 class MatchPlayingXITab extends StatefulWidget {
-  const MatchPlayingXITab({super.key, required this.matchId, required this.isLive});
+  const MatchPlayingXITab({super.key, required this.matchId, required this.isLive, this.service, this.onPlayerTap});
   final String matchId;
   final bool isLive;
+  final MatchService? service;
+  final void Function(String playerKey)? onPlayerTap;
 
   @override
   State<MatchPlayingXITab> createState() => _MatchPlayingXITabState();
 }
 
+class _Lineups {
+  const _Lineups(this.xi, this.squad);
+  final PlayingXIView xi;
+  final SquadView squad;
+  String get signature => '${xi.signature}#${squad.signature}';
+}
+
 class _MatchPlayingXITabState extends State<MatchPlayingXITab> with LiveTabPolling {
-  late Loadable<PlayingXIView> _state;
-  PlayingXIView? _builtFor;
-  Widget? _built;
+  late Loadable<_Lineups> _state;
 
   @override
   void initState() {
@@ -33,17 +43,16 @@ class _MatchPlayingXITabState extends State<MatchPlayingXITab> with LiveTabPolli
 
   void _start() {
     final matchId = widget.matchId;
-    late final Loadable<PlayingXIView> l;
-    l = Loadable<PlayingXIView>(() async {
-      final res = await MatchService.instance.getMatchPlayingXI(matchId);
-      final next = parsePlayingXI(res.data);
+    final service = widget.service ?? MatchService.instance;
+    late final Loadable<_Lineups> l;
+    l = Loadable<_Lineups>(() async {
+      final squadF = service.getMatchSquad(matchId).then((r) => parseSquad(r.data)).catchError((Object _) => SquadView.empty);
+      final xi = parsePlayingXI((await service.getMatchPlayingXI(matchId)).data);
+      final next = _Lineups(xi, await squadF);
       final prev = l.data;
-      // Unchanged poll → keep the old instance so the built list is reused.
-      return prev != null && prev == next ? prev : next;
+      return prev != null && prev.signature == next.signature ? prev : next;
     });
     _state = l;
-    _builtFor = null;
-    _built = null;
     l.load();
     configurePolling(widget.isLive, () => l.load(silent: true));
   }
@@ -74,231 +83,137 @@ class _MatchPlayingXITabState extends State<MatchPlayingXITab> with LiveTabPolli
         if (data == null) {
           final err = _state.errorMessage;
           if (err != null && !_state.loading) {
-            return ErrorRetry(key: const ValueKey('playing_xi_error'), message: err, onRetry: _state.load);
+            return ErrorRetry(key: const ValueKey('playing_xi_error'), title: "Line-ups didn't load", message: err, onRetry: _state.load);
           }
-          return const _PlayingXIShimmer();
+          return const _LineupSkeleton();
         }
-        if (!identical(data, _builtFor) || _built == null) {
-          _builtFor = data;
-          _built = data.hasMatch
-              ? _PlayingXIBody(view: data)
-              : const Padding(
-                  key: ValueKey('playing_xi_empty'),
-                  padding: EdgeInsets.all(40),
-                  child: TabEmptyText('No Playing XI data available'),
-                );
+        if (!data.xi.hasMatch) {
+          return const MdNote(
+            key: ValueKey('playing_xi_empty'),
+            'Playing XI not announced yet. It appears here once the provider sends the team sheets.',
+            padding: EdgeInsets.symmetric(vertical: Spacing.sm),
+          );
         }
-        return _built ?? const SizedBox.shrink();
+        return _LineupBody(data: data, onPlayerTap: widget.onPlayerTap);
       },
     );
   }
 }
 
-class _PlayingXIBody extends StatelessWidget {
-  const _PlayingXIBody({required this.view});
-  final PlayingXIView view;
-
-  @override
-  Widget build(BuildContext context) => TabScrollBody(
-        storageKey: 'match_playing_xi_tab',
-        children: [
-          _TeamCard(key: const ValueKey('playing_xi_team1'), team: view.team1),
-          _TeamCard(key: const ValueKey('playing_xi_team2'), team: view.team2),
-        ],
-      );
-}
-
-const _teamCardDecoration = BoxDecoration(
-  color: AppColors.card,
-  borderRadius: BorderRadius.all(Radius.circular(8)),
-  border: Border.fromBorderSide(BorderSide(color: AppColors.border)),
-);
-
-const _teamHeaderDecoration =
-    BoxDecoration(color: AppColors.tableHeaderBg, borderRadius: BorderRadius.all(Radius.circular(6)));
-
-const _rowBorder = BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border, width: 0.5)));
-
-class _TeamCard extends StatelessWidget {
-  const _TeamCard({super.key, required this.team});
-  final XiTeam team;
+class _LineupBody extends StatelessWidget {
+  const _LineupBody({required this.data, this.onPlayerTap});
+  final _Lineups data;
+  final void Function(String key)? onPlayerTap;
 
   @override
   Widget build(BuildContext context) {
-    final logo = team.logo;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: _teamCardDecoration,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-            decoration: _teamHeaderDecoration,
-            child: Row(
-              children: [
-                if (logo != null) ...[
-                  NetImage(url: logo, size: 28, radius: 0, background: Colors.transparent, fallbackLetter: team.name),
-                  const SizedBox(width: 8),
-                ],
-                Expanded(
-                  child: Text('${team.name} Squad',
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.tableHeaderText)),
-                ),
-              ],
-            ),
-          ),
-          if (team.players.isEmpty)
-            const TabEmptyText('No players available')
-          else
-            for (final p in team.players) _PlayerRow(key: ValueKey('playing_xi_player_${p.id}'), player: p),
-        ],
-      ),
-    );
+    final t1 = _TeamList(key: const ValueKey('playing_xi_team1'), team: data.xi.team1, bench: data.squad.bench1, keepers: data.squad.keepers, onPlayerTap: onPlayerTap);
+    final t2 = _TeamList(key: const ValueKey('playing_xi_team2'), team: data.xi.team2, bench: data.squad.bench2, keepers: data.squad.keepers, onPlayerTap: onPlayerTap);
+    return LayoutBuilder(builder: (context, c) {
+      if (c.maxWidth >= 600) {
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: t1),
+          const SizedBox(width: Spacing.xl),
+          Expanded(child: t2),
+        ]);
+      }
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [t1, const SizedBox(height: Spacing.lg), t2]);
+    });
   }
 }
 
-class _Badge extends StatelessWidget {
-  const _Badge({required this.text, required this.bg, required this.fg, this.border});
-  final String text;
-  final Color bg, fg;
-  final Color? border;
+class _TeamList extends StatelessWidget {
+  const _TeamList({super.key, required this.team, required this.bench, required this.keepers, this.onPlayerTap});
+  final XiTeam team;
+  final List<XiPlayer> bench;
+  final Set<String> keepers;
+  final void Function(String key)? onPlayerTap;
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(6),
-          border: border == null ? null : Border.all(color: border ?? bg),
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Padding(
+        padding: const EdgeInsets.only(bottom: Spacing.sm),
+        child: Row(children: [
+          TeamLogo(url: team.logo, name: team.name, size: 24),
+          const SizedBox(width: Spacing.sm),
+          Expanded(child: Text(team.name, style: AppFont.style(size: 15, weight: FontWeight.w700, color: p.ink))),
+        ]),
+      ),
+      if (team.players.isEmpty)
+        const MdNote('No players listed.', padding: EdgeInsets.zero)
+      else
+        for (final pl in team.players) _PlayerRow(key: ValueKey('playing_xi_player_${pl.id}'), player: pl, keepers: keepers, onTap: onPlayerTap),
+      if (bench.isNotEmpty) ...[
+        Padding(
+          padding: const EdgeInsets.only(top: Spacing.md, bottom: Spacing.xs),
+          child: Text('Bench', style: AppFont.style(size: 13, weight: FontWeight.w700, color: p.inkMuted)),
         ),
-        child: Text(text, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: fg)),
-      );
+        for (final pl in bench) _PlayerRow(key: ValueKey('playing_xi_bench_${pl.id}'), player: pl, keepers: keepers, onTap: onPlayerTap),
+      ],
+    ]);
+  }
 }
 
 class _PlayerRow extends StatelessWidget {
-  const _PlayerRow({super.key, required this.player});
+  const _PlayerRow({super.key, required this.player, required this.keepers, this.onTap});
   final XiPlayer player;
+  final Set<String> keepers;
+  final void Function(String key)? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final avatar = player.avatar;
-    final country = player.country;
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-      decoration: _rowBorder,
-      child: Row(
-        children: [
-          // RN: person icon when the URL is missing (NetImage shows the
-          // initial letter when the URL fails to load).
-          avatar != null
-              ? NetImage(url: avatar, size: 40, fit: BoxFit.cover, background: AppColors.borderSubtle, fallbackLetter: player.name)
-              : Container(
-                  width: 40,
-                  height: 40,
-                  decoration: const BoxDecoration(color: AppColors.borderSubtle, shape: BoxShape.circle),
-                  child: const Icon(Icons.person, size: 26, color: AppColors.textMuted, semanticLabel: 'Player'),
-                ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Text(player.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.text)),
-                      ),
-                      if (player.isCaptain) ...[
-                        const SizedBox(width: 8),
-                        const _Badge(text: 'C', bg: AppColors.goldLight, fg: AppColors.goldDark, border: AppColors.gold),
-                      ],
-                      if (player.isWicketKeeper) ...[
-                        const SizedBox(width: 8),
-                        const _Badge(text: 'WK', bg: AppColors.silver, fg: AppColors.white),
-                      ],
-                    ],
-                  ),
-                ),
-                Text(player.roleLabel, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                if (country != null) ...[
-                  const SizedBox(height: 2),
-                  Text(country, style: const TextStyle(fontSize: 11, color: AppColors.textMuted)),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
+    final p = context.palette;
+    final wk = player.isWicketKeeper || keepers.contains(player.id);
+    final synthetic = RegExp(r'^(playingXI|bench|substitutes)_Team\d-\d+$').hasMatch(player.id);
+    final tappable = onTap != null && !synthetic;
+    final child = Container(
+      constraints: const BoxConstraints(minHeight: 48),
+      padding: const EdgeInsets.symmetric(vertical: Spacing.xs + 2),
+      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: p.hairline))),
+      child: Row(children: [
+        NetImage(url: player.avatar, size: 32, fallbackLetter: player.name, background: p.surfaceAlt),
+        const SizedBox(width: Spacing.md),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Wrap(spacing: Spacing.xs + 2, runSpacing: 2, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              Text(player.name, style: AppFont.style(size: 14, weight: FontWeight.w600, color: p.ink, height: 1.3)),
+              if (player.isCaptain) const MdTag('C'),
+              if (wk) const MdTag('WK'),
+            ]),
+            Text(player.roleLabel, style: AppText.small.copyWith(color: p.inkMuted)),
+          ]),
+        ),
+        if (tappable) Icon(Icons.chevron_right, size: 18, color: p.inkMuted),
+      ]),
+    );
+    final label = '${player.name}${player.isCaptain ? ', captain' : ''}${wk ? ', wicketkeeper' : ''}, ${player.roleLabel}';
+    return Semantics(
+      label: label,
+      button: tappable,
+      excludeSemantics: true,
+      child: tappable ? InkWell(onTap: () => onTap!(player.id), child: child) : child,
     );
   }
 }
 
-// ── Shimmer (RN PlayingXIShimmerTeam ×2, 5 rows each) ───────────────────────
-
-class _PlayingXIShimmer extends StatelessWidget {
-  const _PlayingXIShimmer();
+class _LineupSkeleton extends StatelessWidget {
+  const _LineupSkeleton();
 
   @override
   Widget build(BuildContext context) => ShimmerGroup(
         key: const ValueKey('playing_xi_loading'),
-        child: TabScrollBody(
-          storageKey: 'match_playing_xi_tab_loading',
-          children: [for (var t = 0; t < 2; t++) const _ShimmerTeam()],
-        ),
-      );
-}
-
-class _ShimmerTeam extends StatelessWidget {
-  const _ShimmerTeam();
-
-  @override
-  Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.only(bottom: 16),
-        padding: const EdgeInsets.all(16),
-        decoration: _teamCardDecoration,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-              decoration: _teamHeaderDecoration,
-              child: const Row(children: [
-                ShimmerBox(width: 28, height: 28, radius: 6),
-                SizedBox(width: 8),
-                ShimmerBox(width: 140, height: 16, radius: 4),
+        child: Column(children: [
+          for (var i = 0; i < 5; i++)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: Spacing.xs + 2),
+              child: Row(children: [
+                ShimmerBox(width: 32, height: 32, radius: 16),
+                SizedBox(width: Spacing.md),
+                Expanded(child: ShimmerBox(height: 14, radius: 4)),
               ]),
             ),
-            for (var i = 0; i < 5; i++)
-              Container(
-                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-                decoration: _rowBorder,
-                child: const Row(
-                  children: [
-                    ShimmerBox(width: 40, height: 40, radius: 20),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          FractionallySizedBox(widthFactor: 0.55, child: ShimmerBox(height: 14, radius: 4)),
-                          SizedBox(height: 6),
-                          FractionallySizedBox(widthFactor: 0.30, child: ShimmerBox(height: 11, radius: 4)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-        ),
+        ]),
       );
 }

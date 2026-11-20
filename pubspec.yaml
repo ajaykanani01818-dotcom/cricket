@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 0.0.1+1
 
 environment:
   sdk: ^3.12.2
@@ -46,6 +46,8 @@ dependencies:
   package_info_plus: ^10.2.2
   in_app_review: ^2.0.12
   intl: ^0.20.2
+  cryptography: ^2.9.0
+  video_player: ^2.14.1
 
 dev_dependencies:
   flutter_test:
@@ -69,8 +71,29 @@ dev_dependencies:
 # The following section is specific to Flutter packages.
 flutter:
   assets:
+    - assets/brand/
     - assets/images/
     - assets/hero/
+    - assets/video/
+
+  # Archivo variable font (OFL, assets/fonts/Archivo-OFL.txt), subset to Latin
+  # + figures, axes wght 400-900 / wdth 72-100. The same file is registered at
+  # every weight so the engine never synthesises bold on top of the `wght`
+  # variation (see lib/core/theme/app_typography.dart).
+  fonts:
+    - family: Archivo
+      fonts:
+        - asset: assets/fonts/Archivo.ttf
+        - asset: assets/fonts/Archivo.ttf
+          weight: 500
+        - asset: assets/fonts/Archivo.ttf
+          weight: 600
+        - asset: assets/fonts/Archivo.ttf
+          weight: 700
+        - asset: assets/fonts/Archivo.ttf
+          weight: 800
+        - asset: assets/fonts/Archivo.ttf
+          weight: 900
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

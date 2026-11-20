@@ -27,14 +27,23 @@ Future<String?> resolveSeriesId(
     JsonMap? hit;
     for (final s in catalog) {
       final n = J.text(s['name']);
-      final keys = [J.text(s['sb_series_key']), J.text(s['key']), J.text(s['_id'])];
-      if ((n != null && (n == name || n == altName)) || keys.any((k) => k != null && ids.contains(k))) {
+      final keys = [
+        J.text(s['sb_series_key']),
+        J.text(s['key']),
+        J.text(s['_id']),
+      ];
+      if ((n != null && (n == name || n == altName)) ||
+          keys.any((k) => k != null && ids.contains(k))) {
         hit = s;
         break;
       }
     }
     if (hit != null) {
-      for (final id in [J.text(hit['sb_series_key']), J.text(hit['key']), J.text(hit['_id'])]) {
+      for (final id in [
+        J.text(hit['sb_series_key']),
+        J.text(hit['key']),
+        J.text(hit['_id']),
+      ]) {
         // Same order as RN (each catalog id is unshifted in turn).
         if (id != null && !ids.contains(id)) ids.insert(0, id);
       }

@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:crickbex/core/api/json.dart';
 import 'package:crickbex/features/players/players_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,264 +8,392 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'test_helpers.dart';
 
-/// A page of [n] players for [country] with ids prefixed by page number.
-Map<String, Object> page(String country, int pageNum, {int n = 20, int total = 5370}) => {
-      'message': 'ok',
-      'data': [
-        for (var i = 0; i < n; i++)
-          {
-            '_id': '$country-$pageNum-$i',
-            'playerKey': '${country.toLowerCase()}_${pageNum}_$i',
-            'name': '$country P$pageNum-$i',
-            'country': country,
-            'role': 0,
-            'battingStyle': 0,
-          }
-      ],
-      'pageInfo': {'page': pageNum, 'perPage': 20, 'total': total},
-    };
-
-bool isCountries(Uri u) => u.path == '/players/countries';
-bool isCountry(Uri u, String c) => u.path == '/players/country/$c';
+Map<String, Object> _page(
+  String prefix,
+  int page, {
+  int count = 20,
+  int total = 60,
+}) => {
+  'message': 'ok',
+  'data': [
+    for (var i = 0; i < count; i++)
+      {
+        '_id': '$prefix-$page-$i',
+        'playerKey': '$prefix-$page-$i',
+        'name': 'Player $prefix $page-$i',
+        'role': 0,
+      },
+  ],
+  'pageInfo': {'page': page, 'perPage': 20, 'total': total},
+};
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  Future<void> pumpScreen(WidgetTester t) async {
-    await t.pumpWidget(routerApp(testRouter('/players', const PlayersScreen())));
-  }
+  Future<void> pumpScreen(WidgetTester t) =>
+      t.pumpWidget(routerApp(testRouter('/players', const PlayersScreen())));
 
-  http.Response fixtures(http.Request r) {
-    if (isCountries(r.url)) return jsonRes(fixture('players_countries'));
-    final p = int.parse(r.url.queryParameters['page'] ?? '1');
-    if (p == 1 && isCountry(r.url, 'India')) return jsonRes(fixture('players_country'));
-    return jsonRes(page(r.url.pathSegments.last, p));
-  }
+  Iterable<Uri> trendingCalls(FakeApi api) =>
+      api.where((u) => u.path == '/players/trending');
 
-  testWidgets('shimmer → country tabs + India players (fixture)', (t) async {
-    final pending = Completer<http.Response>();
-    final api = FakeApi((r) => isCountries(r.url) ? jsonRes(fixture('players_countries')) : pending.future);
+  testWidgets('skeleton → trending strip, country chips and India players', (
+    t,
+  ) async {
+    final gate = Completer<void>();
+    final api = FakeApi((r) async {
+      await gate.future;
+      return discoverFixtures(r);
+    });
     await pumpScreen(t);
     expect(find.byKey(const ValueKey('players_shimmer')), findsOneWidget);
-    await t.pump();
-    expect(api.where((u) => isCountry(u, 'India')).single.queryParameters, {'page': '1', 'perPage': '20'});
-
-    pending.complete(jsonRes(fixture('players_country')));
+    gate.complete();
     await t.pumpAndSettle();
     expect(find.byKey(const ValueKey('players_shimmer')), findsNothing);
+    expect(find.text('Trending'), findsOneWidget);
+    expect(find.byKey(const ValueKey('players_trending')), findsOneWidget);
+    expect(find.text('Ibrahim Zadran'), findsOneWidget);
+    expect(find.byKey(const ValueKey('players_country_India')), findsOneWidget);
     expect(find.text('Yashasvi Jaiswal'), findsOneWidget);
-    expect(find.text('Batsman · Left Handed'), findsWidgets);
-    expect(find.byKey(const ValueKey('players_country_India')), findsOneWidget);
-    expect(find.byKey(const ValueKey('players_country_Afghanistan')), findsOneWidget);
+    expect(find.textContaining('Batter, left-hand bat'), findsWidgets);
+    expect(find.text('#5 Test'), findsOneWidget);
+    expect(
+      api
+          .where((u) => u.path == '/players/country/India')
+          .single
+          .queryParameters,
+      {'page': '1', 'perPage': '20'},
+    );
   });
 
-  testWidgets('infinite scroll loads each page exactly once and appends', (t) async {
-    final gate = <int, Completer<void>>{};
-    final api = FakeApi((r) async {
-      if (isCountries(r.url)) return jsonRes(fixture('players_countries'));
-      final p = int.parse(r.url.queryParameters['page']!);
-      if (p > 1) await (gate[p] = Completer<void>()).future;
-      return jsonRes(page('India', p, total: 45));
-    });
+  testWidgets(
+    'search is debounced: one request for the final text, server + local matches',
+    (t) async {
+      final api = FakeApi((r) {
+        if (r.url.path == '/players/trending' &&
+            r.url.queryParameters['search'] != null) {
+          return jsonRes({
+            'data': [
+              {
+                '_id': 's1',
+                'key': 'virat_kohli',
+                'name': 'Virat Kohli',
+                'country': 'India',
+              },
+              {
+                '_id': 's2',
+                'key': 'unrelated',
+                'name': 'Someone Else',
+                'country': 'Nepal',
+              },
+            ],
+          });
+        }
+        return discoverFixtures(r);
+      });
+      await pumpScreen(t);
+      await t.pumpAndSettle();
+      final before = trendingCalls(api).length;
+
+      final field = find.byKey(const ValueKey('players_search'));
+      await t.enterText(field, 'k');
+      await t.pump(const Duration(milliseconds: 100));
+      await t.enterText(field, 'ko');
+      await t.pump(const Duration(milliseconds: 100));
+      await t.enterText(field, 'kohli');
+      await t.pump(const Duration(milliseconds: 100));
+      expect(
+        trendingCalls(api).length,
+        before,
+        reason: 'nothing sent while typing',
+      );
+      await t.pump(PlayersScreen.searchDebounce);
+      await t.pumpAndSettle();
+
+      final searches = trendingCalls(
+        api,
+      ).where((u) => u.queryParameters.containsKey('search')).toList();
+      expect(searches.length, 1);
+      expect(searches.single.queryParameters['search'], 'kohli');
+      expect(find.text('1 player found'), findsOneWidget);
+      expect(find.text('Virat Kohli'), findsOneWidget);
+      // Rows the server sent that do not match are dropped.
+      expect(find.text('Someone Else'), findsNothing);
+      expect(find.text('India'), findsWidgets);
+
+      await t.tap(find.text('Virat Kohli'));
+      await t.pumpAndSettle();
+      expect(find.text('detail:virat_kohli:Virat Kohli'), findsOneWidget);
+    },
+  );
+
+  testWidgets('one-letter queries do not search; clear returns to browsing', (
+    t,
+  ) async {
+    final api = FakeApi(discoverFixtures);
     await pumpScreen(t);
     await t.pumpAndSettle();
-    expect(find.text('India P1-0'), findsOneWidget);
+    await t.enterText(find.byKey(const ValueKey('players_search')), 'y');
+    await t.pump(PlayersScreen.searchDebounce);
+    await t.pumpAndSettle();
+    expect(api.where((u) => u.queryParameters.containsKey('search')), isEmpty);
+    expect(find.byKey(const ValueKey('players_list')), findsOneWidget);
 
-    // Many scroll events near the end while page 2 is in flight.
-    final list = find.byKey(const ValueKey('players_list'));
-    for (var i = 0; i < 6; i++) {
-      await t.drag(list, const Offset(0, -800));
-      await t.pump();
-    }
-    expect(api.where((u) => u.queryParameters['page'] == '2').length, 1);
-    expect(find.byKey(const ValueKey('players_loading_more')), findsOneWidget);
-
-    gate[2]!.complete();
+    await t.enterText(find.byKey(const ValueKey('players_search')), 'jaiswal');
+    await t.pump(PlayersScreen.searchDebounce);
     await t.pumpAndSettle();
-    for (var i = 0; i < 6; i++) {
-      await t.drag(list, const Offset(0, -800));
-      await t.pump();
-    }
-    expect(api.where((u) => u.queryParameters['page'] == '3').length, 1);
-    gate[3]!.complete();
+    // The server returned the unfiltered trending list; the loaded India
+    // page still matches locally.
+    expect(find.text('Yashasvi Jaiswal'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('players_search_clear')));
     await t.pumpAndSettle();
-    await t.drag(list, const Offset(0, -3000));
-    await t.pumpAndSettle();
-    // total 45 → 3 pages; no page 4 and the end marker is shown.
-    expect(api.where((u) => u.queryParameters['page'] == '4'), isEmpty);
-    expect(find.text('No more players'), findsOneWidget);
-    expect(find.text('India P3-19'), findsOneWidget);
+    expect(find.byKey(const ValueKey('players_list')), findsOneWidget);
   });
 
-  testWidgets('duplicate rows across pages are dropped', (t) async {
-    FakeApi((r) {
-      if (isCountries(r.url)) return jsonRes({'data': ['India']});
-      final p = int.parse(r.url.queryParameters['page']!);
-      // page 2 repeats page 1 entirely.
-      final body = page('India', 1, n: 20, total: 40);
-      (body['pageInfo'] as JsonMap)['page'] = p;
-      return jsonRes(body);
-    });
+  testWidgets('no search result says what to do and offers browsing', (
+    t,
+  ) async {
+    FakeApi(discoverFixtures);
     await pumpScreen(t);
     await t.pumpAndSettle();
-    await t.drag(find.byKey(const ValueKey('players_list')), const Offset(0, -5000));
+    await t.enterText(find.byKey(const ValueKey('players_search')), 'zzqx');
+    await t.pump(PlayersScreen.searchDebounce);
     await t.pumpAndSettle();
-    await t.drag(find.byKey(const ValueKey('players_list')), const Offset(0, -5000));
+    expect(find.text('No player named "zzqx"'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('empty_state_action')));
     await t.pumpAndSettle();
-    expect(find.text('No more players'), findsOneWidget);
-    expect(t.takeException(), isNull);
+    expect(find.byKey(const ValueKey('players_list')), findsOneWidget);
   });
 
-  testWidgets('short page without pageInfo has no more pages', (t) async {
-    final api = FakeApi((r) => isCountries(r.url)
-        ? jsonRes({'data': ['India']})
-        : jsonRes({'data': (page('India', 1, n: 3)['data'])}));
-    await pumpScreen(t);
-    await t.pumpAndSettle();
-    expect(find.text('No more players'), findsOneWidget);
-    expect(api.where((u) => u.queryParameters['page'] == '2'), isEmpty);
-  });
-
-  testWidgets('switching country fetches it and ignores the stale previous response', (t) async {
-    final indiaGate = Completer<void>();
-    var indiaCalls = 0;
-    final api = FakeApi((r) async {
-      if (isCountries(r.url)) return jsonRes(fixture('players_countries'));
-      if (isCountry(r.url, 'India')) {
-        indiaCalls++;
-        await indiaGate.future;
-        return jsonRes(page('India', 1));
-      }
-      return jsonRes(page(r.url.pathSegments.last, 1));
-    });
-    await pumpScreen(t);
-    await t.pump();
-    await t.pump();
-    expect(indiaCalls, 1);
-
-    // Tabs auto-scroll to the selected country; bring Afghanistan back.
-    await t.pump(const Duration(milliseconds: 400));
-    await t.ensureVisible(find.byKey(const ValueKey('players_country_Afghanistan')));
-    await t.pump(const Duration(milliseconds: 100));
-    await t.tap(find.byKey(const ValueKey('players_country_Afghanistan')));
-    await t.pump(const Duration(milliseconds: 130));
-    await t.pumpAndSettle();
-    expect(api.where((u) => isCountry(u, 'Afghanistan')).length, 1);
-    expect(find.text('Afghanistan P1-0'), findsOneWidget);
-
-    indiaGate.complete();
-    await t.pumpAndSettle();
-    expect(find.text('India P1-0'), findsNothing);
-    expect(find.text('Afghanistan P1-0'), findsOneWidget);
-  });
-
-  testWidgets('falls back to the first country when India is missing', (t) async {
-    final api = FakeApi((r) {
-      if (isCountries(r.url)) return jsonRes({'data': ['Zimbabwe', 'Australia']});
-      return jsonRes(page(r.url.pathSegments.last, 1));
-    });
-    await pumpScreen(t);
-    await t.pumpAndSettle();
-    expect(api.where((u) => isCountry(u, 'Australia')).length, 1);
-    expect(find.text('Australia P1-0'), findsOneWidget);
-    expect(find.text('India P1-0'), findsNothing);
-  });
-
-  testWidgets('countries failure falls back to India', (t) async {
-    FakeApi((r) => isCountries(r.url) ? jsonRes({'message': 'x'}, 500) : jsonRes(page('India', 1)));
-    await pumpScreen(t);
-    await t.pumpAndSettle();
-    expect(find.byKey(const ValueKey('players_country_India')), findsOneWidget);
-    expect(find.text('India P1-0'), findsOneWidget);
-  });
-
-  testWidgets('error shows Try Again which recovers', (t) async {
+  testWidgets('search failure with nothing local shows Try again', (t) async {
     var fail = true;
     FakeApi((r) {
-      if (isCountries(r.url)) return jsonRes(fixture('players_countries'));
-      return fail ? jsonRes({'message': 'Players unavailable'}, 500) : jsonRes(fixture('players_country'));
+      if (r.url.queryParameters['search'] != null) {
+        return fail
+            ? jsonRes({'message': 'x'}, 500)
+            : jsonRes({
+                'data': [
+                  {'key': 'abc', 'name': 'Qwerty Abc'},
+                ],
+              });
+      }
+      return discoverFixtures(r);
     });
     await pumpScreen(t);
     await t.pumpAndSettle();
-    expect(find.text('Players unavailable'), findsOneWidget);
+    await t.enterText(find.byKey(const ValueKey('players_search')), 'qwerty');
+    await t.pump(PlayersScreen.searchDebounce);
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('players_search_error')), findsOneWidget);
     fail = false;
-    await t.tap(find.byKey(const ValueKey('players_retry')));
+    await t.tap(find.byKey(const ValueKey('empty_state_action')));
+    await t.pumpAndSettle();
+    expect(find.text('Qwerty Abc'), findsOneWidget);
+  });
+
+  testWidgets('infinite scroll loads each page exactly once and appends', (
+    t,
+  ) async {
+    final api = FakeApi((r) {
+      if (r.url.path.startsWith('/players/country/')) {
+        return jsonRes(_page('in', int.parse(r.url.queryParameters['page']!)));
+      }
+      return discoverFixtures(r);
+    });
+    await pumpScreen(t);
+    await t.pumpAndSettle();
+    for (var i = 0; i < 12; i++) {
+      await t.drag(
+        find.byKey(const ValueKey('players_list')),
+        const Offset(0, -1500),
+      );
+      await t.pumpAndSettle();
+    }
+    final pages = api
+        .where((u) => u.path.startsWith('/players/country/'))
+        .map((u) => u.queryParameters['page'])
+        .toList();
+    expect(pages, ['1', '2', '3']);
+    expect(find.text('That is everyone listed for India'), findsOneWidget);
+  });
+
+  testWidgets('switching country ignores the stale previous response', (
+    t,
+  ) async {
+    final slow = Completer<http.Response>();
+    FakeApi((r) {
+      if (r.url.path == '/players/countries') {
+        return jsonRes({
+          'data': ['India', 'Nepal'],
+        });
+      }
+      if (r.url.path == '/players/country/India') return slow.future;
+      if (r.url.path == '/players/country/Nepal') {
+        return jsonRes(_page('np', 1, count: 3, total: 3));
+      }
+      return discoverFixtures(r);
+    });
+    await pumpScreen(t);
+    await t.pump();
+    await t.pump();
+    await t.tap(find.byKey(const ValueKey('players_country_Nepal')));
+    await t.pumpAndSettle();
+    slow.complete(jsonRes(_page('in', 1)));
+    await t.pumpAndSettle();
+    expect(find.text('Player np 1-0'), findsOneWidget);
+    expect(find.text('Player in 1-0'), findsNothing);
+  });
+
+  testWidgets(
+    'countries failure falls back to India; trending failure hides the strip',
+    (t) async {
+      FakeApi((r) {
+        if (r.url.path == '/players/countries' ||
+            r.url.path == '/players/trending') {
+          return jsonRes({'message': 'x'}, 500);
+        }
+        return discoverFixtures(r);
+      });
+      await pumpScreen(t);
+      await t.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('players_country_India')),
+        findsOneWidget,
+      );
+      expect(find.text('Trending'), findsNothing);
+      expect(find.text('Yashasvi Jaiswal'), findsOneWidget);
+    },
+  );
+
+  testWidgets('error shows Try again which recovers', (t) async {
+    var fail = true;
+    FakeApi((r) {
+      if (r.url.path.startsWith('/players/country/') && fail) {
+        return jsonRes({'message': 'x'}, 500);
+      }
+      return discoverFixtures(r);
+    });
+    await pumpScreen(t);
+    await t.pumpAndSettle();
+    expect(find.text("Players didn't load"), findsOneWidget);
+    fail = false;
+    await t.tap(find.byKey(const ValueKey('empty_state_action')));
     await t.pumpAndSettle();
     expect(find.text('Yashasvi Jaiswal'), findsOneWidget);
   });
 
-  testWidgets('load-more failure shows inline retry instead of looping', (t) async {
+  testWidgets('load-more failure shows inline retry instead of looping', (
+    t,
+  ) async {
     var failPage2 = true;
     final api = FakeApi((r) {
-      if (isCountries(r.url)) return jsonRes({'data': ['India']});
-      final p = int.parse(r.url.queryParameters['page']!);
-      if (p == 2 && failPage2) return jsonRes({'message': 'x'}, 500);
-      return jsonRes(page('India', p, total: 40));
+      if (r.url.path.startsWith('/players/country/')) {
+        final page = int.parse(r.url.queryParameters['page']!);
+        if (page == 2 && failPage2) return jsonRes({'message': 'x'}, 500);
+        return jsonRes(_page('in', page, total: 40));
+      }
+      return discoverFixtures(r);
     });
     await pumpScreen(t);
     await t.pumpAndSettle();
-    final list = find.byKey(const ValueKey('players_list'));
-    await t.drag(list, const Offset(0, -5000));
-    await t.pumpAndSettle();
-    await t.drag(list, const Offset(0, -500));
-    await t.pumpAndSettle();
+    for (var i = 0; i < 4; i++) {
+      await t.drag(
+        find.byKey(const ValueKey('players_list')),
+        const Offset(0, -2000),
+      );
+      await t.pumpAndSettle();
+    }
+    expect(
+      find.byKey(const ValueKey('players_load_more_retry')),
+      findsOneWidget,
+    );
     expect(api.where((u) => u.queryParameters['page'] == '2').length, 1);
-    expect(find.byKey(const ValueKey('players_load_more_retry')), findsOneWidget);
-    expect(find.text('India P1-0'), findsNothing); // scrolled away, but list kept
     failPage2 = false;
     await t.tap(find.byKey(const ValueKey('players_load_more_retry')));
     await t.pumpAndSettle();
-    expect(api.where((u) => u.queryParameters['page'] == '2').length, 2);
-    await t.drag(list, const Offset(0, -5000));
-    await t.pumpAndSettle();
-    expect(find.text('India P2-19'), findsOneWidget);
+    expect(find.text('Player in 2-0'), findsOneWidget);
   });
 
-  testWidgets('empty country shows "No players in this country"', (t) async {
-    FakeApi((r) => isCountries(r.url) ? jsonRes({'data': ['India']}) : jsonRes({'data': [], 'pageInfo': {'page': 1, 'perPage': 20, 'total': 0}}));
+  testWidgets('empty country says what to do', (t) async {
+    FakeApi((r) {
+      if (r.url.path.startsWith('/players/country/')) {
+        return jsonRes({'data': []});
+      }
+      return discoverFixtures(r);
+    });
     await pumpScreen(t);
     await t.pumpAndSettle();
-    expect(find.byKey(const ValueKey('players_empty')), findsOneWidget);
+    expect(find.text('No players listed for India'), findsOneWidget);
+    expect(
+      find.text('Pick another country above, or search by name.'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('tap navigates with the list item as initial player (once)', (t) async {
-    FakeApi(fixtures);
-    final router = testRouter('/players', const PlayersScreen());
-    await t.pumpWidget(routerApp(router));
+  testWidgets('tap navigates once with the list item as initial player', (
+    t,
+  ) async {
+    FakeApi(discoverFixtures);
+    await pumpScreen(t);
     await t.pumpAndSettle();
     await t.tap(find.text('Yashasvi Jaiswal'));
     await t.tap(find.text('Yashasvi Jaiswal'), warnIfMissed: false);
     await t.pumpAndSettle();
-    expect(find.text('detail:yashasvi_jaiswal:Yashasvi Jaiswal'), findsOneWidget);
-    // Root + exactly one detail route.
-    expect(router.routerDelegate.currentConfiguration.matches.last.matchedLocation, '/players/player/yashasvi_jaiswal');
-    expect(router.routerDelegate.currentConfiguration.matches.length, 2);
+    expect(
+      find.text('detail:yashasvi_jaiswal:Yashasvi Jaiswal'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('pull-to-refresh refetches countries and page 1', (t) async {
-    final api = FakeApi(fixtures);
-    await pumpScreen(t);
-    await t.pumpAndSettle();
-    await t.fling(find.byKey(const ValueKey('players_list')), const Offset(0, 400), 1000);
-    await t.pumpAndSettle();
-    expect(api.where(isCountries).length, 2);
-    expect(api.where((u) => isCountry(u, 'India') && u.queryParameters['page'] == '1').length, 2);
-    expect(find.text('Yashasvi Jaiswal'), findsOneWidget);
-  });
-
-  testWidgets('long names and malformed items do not crash', (t) async {
-    FakeApi((r) => isCountries(r.url)
-        ? jsonRes({'data': ['India', 42, null]})
-        : jsonRes({
-            'data': [
-              {'_id': 'a', 'playerKey': 'a', 'name': 'A' * 200, 'role': 'x', 'dob': 'bad', 'logo': 'not a url'},
-              null,
-              {'name': 'no id'},
-            ],
-          }));
+  testWidgets('long names and malformed items do not crash at 320 px × 2.0', (
+    t,
+  ) async {
+    t.view.physicalSize = const Size(320, 640);
+    t.view.devicePixelRatio = 1;
+    t.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(t.view.reset);
+    addTearDown(t.platformDispatcher.clearTextScaleFactorTestValue);
+    FakeApi((r) {
+      if (r.url.path.startsWith('/players/country/')) {
+        return jsonRes({
+          'data': [
+            null,
+            {
+              '_id': 'a',
+              'playerKey': 'a',
+              'name': 'Mohammad Abdullah Al-Rahman bin Khalid the Third',
+              'role': 3,
+              'battingStyle': 1,
+              'dob': 900000000,
+            },
+            {'_id': 'b', 'name': ''},
+            {
+              '_id': 'c',
+              'playerKey': 'c',
+              'name': 'X',
+              'iccRanking': {
+                'all': {'odi': '1'},
+              },
+              'role': 2,
+            },
+          ],
+        });
+      }
+      return discoverFixtures(r);
+    });
     await pumpScreen(t);
     await t.pumpAndSettle();
     expect(t.takeException(), isNull);
-    expect(find.text('A' * 200), findsOneWidget);
+    await t.scrollUntilVisible(
+      find.text('#1 ODI'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const ValueKey('players_list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(find.text('Unnamed player'), findsOneWidget);
+    expect(t.takeException(), isNull);
   });
 }

@@ -1,4 +1,5 @@
 {
-  "API_BASE_URL": "http://<your-mac-lan-ip>:8001/api/cricbex",
-  "API_KEY": "<livescore-postdata SB_LIVE_SCORE_API_KEY>"
+  "API_BASE_URL": "http://<your-mac-lan-ip>:8001/api/x",
+  "API_SECRET": "<base64 of livescore-postdata SBX_SECRET (32 bytes)>",
+  "_TODO": "Optional hardening: drop API_SECRET and set API_SECRET_A/B/C (XOR-masked fragments) + API_MASK (base64). See lib/core/config/env.dart SecretFragments.split."
 }

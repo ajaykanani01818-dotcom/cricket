@@ -19,7 +19,11 @@ class _Entry {
   final int ttlMs;
   _Entry(this.data, this.timestamp, this.ttlMs);
   bool get fresh => DateTime.now().millisecondsSinceEpoch - timestamp < ttlMs;
-  Map<String, dynamic> toJson() => {'data': data, 'timestamp': timestamp, 'ttl': ttlMs};
+  Map<String, dynamic> toJson() => {
+    'data': data,
+    'timestamp': timestamp,
+    'ttl': ttlMs,
+  };
 }
 
 class ApiCache {
@@ -32,7 +36,10 @@ class ApiCache {
       '$_prefix$endpoint${params == null ? '' : jsonEncode(params)}';
 
   /// Fresh cached value or null.
-  static Future<dynamic> get(String endpoint, [Map<String, Object?>? params]) async {
+  static Future<dynamic> get(
+    String endpoint, [
+    Map<String, Object?>? params,
+  ]) async {
     final k = key(endpoint, params);
     final mem = _memory[k];
     if (mem != null) {
@@ -54,9 +61,18 @@ class ApiCache {
     return null;
   }
 
-  static Future<void> set(String endpoint, Map<String, Object?>? params, dynamic data, Duration ttl) async {
+  static Future<void> set(
+    String endpoint,
+    Map<String, Object?>? params,
+    dynamic data,
+    Duration ttl,
+  ) async {
     final k = key(endpoint, params);
-    final entry = _Entry(data, DateTime.now().millisecondsSinceEpoch, ttl.inMilliseconds);
+    final entry = _Entry(
+      data,
+      DateTime.now().millisecondsSinceEpoch,
+      ttl.inMilliseconds,
+    );
     _memory[k] = entry;
     if (_memory.length > _maxEntries) _memory.remove(_memory.keys.first);
     try {
@@ -74,7 +90,8 @@ class ApiCache {
   static Future<void> clear() async {
     _memory.clear();
     final prefs = await SharedPreferences.getInstance();
-    for (final k in prefs.getKeys().where((e) => e.startsWith(_prefix)).toList()) {
+    for (final k
+        in prefs.getKeys().where((e) => e.startsWith(_prefix)).toList()) {
       await prefs.remove(k);
     }
   }

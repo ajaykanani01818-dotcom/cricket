@@ -9,18 +9,57 @@ class _Clock {
 }
 
 void main() {
-  group('canAskForReview (pure)', () {
+  group('canAskForReview (pure eligibility rules)', () {
     final now = DateTime(2026, 6, 1);
-    test('needs 2 sessions and 3 meaningful actions', () {
-      expect(canAskForReview(sessionCount: 1, actionCount: 10, lastRequestMs: null, now: now), isFalse);
-      expect(canAskForReview(sessionCount: 2, actionCount: 2, lastRequestMs: null, now: now), isFalse);
-      expect(canAskForReview(sessionCount: 2, actionCount: 3, lastRequestMs: null, now: now), isTrue);
+    bool ask({
+      int sessions = 5,
+      int actions = 5,
+      int? last,
+      bool positive = true,
+      bool askedThisRun = false,
+    }) => canAskForReview(
+      sessionCount: sessions,
+      actionCount: actions,
+      lastRequestMs: last,
+      now: now,
+      positiveMoment: positive,
+      askedThisRun: askedThisRun,
+    );
+
+    test('never on the first launch, nor before 3 sessions', () {
+      expect(ask(sessions: 0), isFalse);
+      expect(ask(sessions: 1), isFalse);
+      expect(ask(sessions: 2), isFalse);
+      expect(ask(sessions: 3), isTrue);
     });
 
-    test('30-day cooldown after a store request', () {
+    test('needs at least 3 match views', () {
+      expect(ask(actions: 2), isFalse);
+      expect(ask(actions: 3), isTrue);
+    });
+
+    test('only after a positive moment', () {
+      expect(ask(positive: false), isFalse);
+    });
+
+    test('at most once per app run', () {
+      expect(ask(askedThisRun: true), isFalse);
+    });
+
+    test('at most once per 30 days; a clock set back never unlocks', () {
       int ago(Duration d) => now.subtract(d).millisecondsSinceEpoch;
-      expect(canAskForReview(sessionCount: 5, actionCount: 5, lastRequestMs: ago(const Duration(days: 29, hours: 23)), now: now), isFalse);
-      expect(canAskForReview(sessionCount: 5, actionCount: 5, lastRequestMs: ago(const Duration(days: 30)), now: now), isTrue);
+      expect(ask(last: ago(const Duration(days: 29, hours: 23))), isFalse);
+      expect(ask(last: ago(const Duration(days: 30))), isTrue);
+      expect(
+        ask(last: now.add(const Duration(days: 3)).millisecondsSinceEpoch),
+        isFalse,
+      );
+    });
+
+    test('rule constants', () {
+      expect(ReviewRules.minSessionsBeforeAsk, 3);
+      expect(ReviewRules.minMeaningfulActions, 3);
+      expect(ReviewRules.cooldownDays, 30);
     });
   });
 
@@ -30,14 +69,14 @@ void main() {
       final clock = _Clock();
       final store = ReviewStore(clock: clock.call);
       expect(await store.canAsk(), isFalse);
-      await store.recordSession();
-      await store.recordSession();
       for (var i = 0; i < 3; i++) {
+        await store.recordSession();
         await store.recordMeaningfulAction();
       }
-      expect(await store.sessionCount(), 2);
+      expect(await store.sessionCount(), 3);
       expect(await store.meaningfulActionCount(), 3);
       expect(await store.canAsk(), isTrue);
+      expect(await store.canAsk(positiveMoment: false), isFalse);
       await store.recordReviewRequested();
       expect(await store.lastRequestMs(), clock.now.millisecondsSinceEpoch);
       expect(await store.canAsk(), isFalse);
@@ -45,7 +84,7 @@ void main() {
       expect(await store.canAsk(), isTrue);
     });
 
-    test('malformed / legacy string values never crash', () async {
+    test('malformed / string values never crash', () async {
       SharedPreferences.setMockInitialValues({
         ReviewStore.keySessionCount: 'abc',
         ReviewStore.keyActionCount: '7',
@@ -62,183 +101,232 @@ void main() {
       SharedPreferences.setMockInitialValues({ReviewStore.keyActionCount: -4});
       expect(await ReviewStore().meaningfulActionCount(), 0);
     });
+
+    test('storage keys carry no legacy brand', () {
+      for (final k in [
+        ReviewStore.keyLastRequest,
+        ReviewStore.keyActionCount,
+        ReviewStore.keySessionCount,
+      ]) {
+        expect(k.toLowerCase(), isNot(contains('crickbex')));
+      }
+    });
   });
 
   group('ReviewController', () {
-    testWidgets('auto prompt shows after 2s when eligible, once per run', (tester) async {
-      SharedPreferences.setMockInitialValues({ReviewStore.keySessionCount: 3, ReviewStore.keyActionCount: 5});
-      final c = ReviewController(openStoreListing: () async => true, exitApp: () {});
-      await c.requestReviewIfAppropriate();
-      expect(c.ratingModalVisible, isFalse);
+    const eligible = {
+      ReviewStore.keySessionCount: 3,
+      ReviewStore.keyActionCount: 5,
+    };
+
+    ReviewController make(
+      List<String> log, {
+      bool requestOk = true,
+      void Function()? exit,
+    }) => ReviewController(
+      requestReview: () async {
+        log.add('requestReview');
+        return requestOk;
+      },
+      openStoreListing: () async {
+        log.add('store');
+        return true;
+      },
+      exitApp: exit ?? () => log.add('exit'),
+    );
+
+    testWidgets(
+      'positive moment + eligible → system review API after the delay, once per run',
+      (tester) async {
+        SharedPreferences.setMockInitialValues(eligible);
+        final log = <String>[];
+        final c = make(log);
+        expect(
+          await c.requestReviewIfAppropriate(positiveMoment: true),
+          isTrue,
+        );
+        expect(log, isEmpty, reason: 'not on top of the tap');
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+        expect(log, ['requestReview']);
+        expect(await c.store.lastRequestMs(), isNotNull);
+
+        expect(
+          await c.requestReviewIfAppropriate(positiveMoment: true),
+          isFalse,
+        );
+        await tester.pump(const Duration(seconds: 3));
+        expect(log, ['requestReview']);
+        c.dispose();
+      },
+    );
+
+    testWidgets('opening a match (no positive moment) never asks', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(eligible);
+      final log = <String>[];
+      final c = make(log);
+      expect(await c.requestReviewIfAppropriate(), isFalse);
+      await tester.pump(const Duration(seconds: 3));
+      expect(log, isEmpty);
+      c.dispose();
+    });
+
+    testWidgets('not eligible (first sessions) → no request', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        ReviewStore.keySessionCount: 1,
+        ReviewStore.keyActionCount: 9,
+      });
+      final log = <String>[];
+      final c = make(log);
+      expect(await c.requestReviewIfAppropriate(positiveMoment: true), isFalse);
+      await tester.pump(const Duration(seconds: 3));
+      expect(log, isEmpty);
+      c.dispose();
+    });
+
+    testWidgets('within the 30-day cooldown → no request', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        ...eligible,
+        ReviewStore.keyLastRequest: DateTime.now()
+            .subtract(const Duration(days: 10))
+            .millisecondsSinceEpoch,
+      });
+      final log = <String>[];
+      final c = make(log);
+      expect(await c.requestReviewIfAppropriate(positiveMoment: true), isFalse);
+      c.dispose();
+    });
+
+    testWidgets('API unavailable → cooldown not consumed', (tester) async {
+      SharedPreferences.setMockInitialValues(eligible);
+      final c = make(<String>[], requestOk: false);
+      await c.requestReviewIfAppropriate(positiveMoment: true);
       await tester.pump(const Duration(seconds: 2));
-      expect(c.ratingModalVisible, isTrue);
-      c.closeRatingModal();
-      await c.requestReviewIfAppropriate();
-      await tester.pump(const Duration(seconds: 3));
-      expect(c.ratingModalVisible, isFalse);
+      await tester.pump();
+      expect(await c.store.lastRequestMs(), isNull);
       c.dispose();
     });
 
-    testWidgets('not eligible → no prompt', (tester) async {
-      SharedPreferences.setMockInitialValues({ReviewStore.keySessionCount: 1});
-      final c = ReviewController(openStoreListing: () async => true, exitApp: () {});
-      await c.requestReviewIfAppropriate();
-      await tester.pump(const Duration(seconds: 3));
-      expect(c.ratingModalVisible, isFalse);
-      c.dispose();
-    });
-
-    testWidgets('dispose cancels a pending auto prompt', (tester) async {
-      SharedPreferences.setMockInitialValues({ReviewStore.keySessionCount: 3, ReviewStore.keyActionCount: 5});
-      final c = ReviewController(openStoreListing: () async => true, exitApp: () {});
-      await c.requestReviewIfAppropriate();
+    testWidgets('dispose cancels a pending request', (tester) async {
+      SharedPreferences.setMockInitialValues(eligible);
+      final log = <String>[];
+      final c = make(log);
+      await c.requestReviewIfAppropriate(positiveMoment: true);
       c.dispose();
       await tester.pump(const Duration(seconds: 3));
+      expect(log, isEmpty);
     });
 
-    test('openStoreListing records the request only on success', () async {
+    test('openStoreListing (Settings) never throws', () async {
       SharedPreferences.setMockInitialValues({});
-      final failing = ReviewController(openStoreListing: () async => false, exitApp: () {});
-      await failing.openStoreListing();
-      expect(await failing.store.lastRequestMs(), isNull);
-      final ok = ReviewController(openStoreListing: () async => true, exitApp: () {});
-      await ok.openStoreListing();
-      expect(await ok.store.lastRequestMs(), isNotNull);
-      final throwing = ReviewController(openStoreListing: () => throw StateError('x'), exitApp: () {});
-      await throwing.openStoreListing();
+      final ok = make(<String>[]);
+      expect(await ok.openStoreListing(), isTrue);
+      final throwing = ReviewController(
+        openStoreListing: () => throw StateError('x'),
+        exitApp: () {},
+      );
+      expect(await throwing.openStoreListing(), isFalse);
     });
   });
 
-  group('ReviewHost + RatingModal', () {
-    late ReviewController c;
-    var storeOpened = 0;
-    var exited = 0;
-
-    setUp(() {
-      SharedPreferences.setMockInitialValues({});
-      storeOpened = 0;
-      exited = 0;
-      c = ReviewController(
-        openStoreListing: () async {
-          storeOpened++;
-          return true;
-        },
-        exitApp: () => exited++,
-      );
-    });
-
-    Future<void> pumpHost(WidgetTester tester) => tester.pumpWidget(MaterialApp(
-          builder: (context, child) => ReviewHost(controller: c, child: child!),
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: Center(
-                child: TextButton(
-                  key: const ValueKey('open'),
-                  onPressed: () => ReviewScope.maybeOf(context)!.showRatingModal(),
-                  child: const Text('open'),
-                ),
-              ),
-            ),
+  group('back on Home (ReviewHost)', () {
+    testWidgets(
+      'never shows a rating prompt: hint first, exit on second press within 2 s',
+      (tester) async {
+        SharedPreferences.setMockInitialValues(const {
+          ReviewStore.keySessionCount: 9,
+          ReviewStore.keyActionCount: 9,
+        });
+        final log = <String>[];
+        var t = DateTime(2026, 6, 1, 10);
+        final c = ReviewController(
+          requestReview: () async {
+            log.add('requestReview');
+            return true;
+          },
+          openStoreListing: () async {
+            log.add('store');
+            return true;
+          },
+          exitApp: () => log.add('exit'),
+          clock: () => t,
+        );
+        addTearDown(c.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) =>
+                ReviewHost(controller: c, child: child!),
+            home: const Scaffold(body: Text('home')),
           ),
-        ));
+        );
 
-    testWidgets('records one session on mount and exposes ReviewScope', (tester) async {
-      await pumpHost(tester);
-      await tester.pump();
-      expect(await c.store.sessionCount(), 1);
-      expect(find.byKey(const ValueKey('review_modal')), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('open')));
-      await tester.pump();
-      expect(find.text('Enjoying CrickBex?'), findsOneWidget);
-      expect(find.byKey(const ValueKey('review_exit_app')), findsNothing);
-    });
+        c.showRatingModalForExit(); // what AppShell calls at the Home root
+        await tester.pump();
+        expect(find.text('Press back again to exit'), findsOneWidget);
+        expect(find.textContaining('Enjoying'), findsNothing);
+        expect(find.byIcon(Icons.star_rounded), findsNothing);
+        expect(log, isEmpty, reason: 'no review request and no store on back');
 
-    testWidgets('3+ stars → loader → store opened after 2s, modal closed', (tester) async {
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('review_star_4')));
-      await tester.pump();
-      expect(find.text('Opening the store…'), findsOneWidget);
-      expect(find.byKey(const ValueKey('review_maybe_later')), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('review_star_1')), warnIfMissed: false);
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
-      expect(storeOpened, 1);
-      expect(c.ratingModalVisible, isFalse);
-      expect(await c.store.lastRequestMs(), isNotNull);
-    });
+        t = t.add(const Duration(seconds: 1));
+        c.showRatingModalForExit();
+        await tester.pump();
+        expect(log, ['exit']);
+        await tester.pump(const Duration(seconds: 3));
+      },
+    );
 
-    testWidgets('1–2 stars → hint + Send feedback closes without store', (tester) async {
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('review_star_2')));
-      await tester.pump();
-      expect(find.text('Tell us what we can improve via Contact Us.'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('review_send_feedback')));
-      await tester.pump();
-      expect(c.ratingModalVisible, isFalse);
-      expect(storeOpened, 0);
-    });
-
-    testWidgets('Maybe later and backdrop tap dismiss', (tester) async {
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('review_maybe_later')));
-      await tester.pump();
-      expect(c.ratingModalVisible, isFalse);
-      c.showRatingModal();
-      await tester.pump();
-      await tester.tapAt(const Offset(5, 5));
-      await tester.pump();
-      expect(c.ratingModalVisible, isFalse);
-    });
-
-    testWidgets('exit flow shows "Exit app" which exits', (tester) async {
-      await pumpHost(tester);
+    testWidgets('a slow second press shows the hint again instead of exiting', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final log = <String>[];
+      var t = DateTime(2026, 6, 1, 10);
+      final c = ReviewController(
+        exitApp: () => log.add('exit'),
+        clock: () => t,
+      );
+      addTearDown(c.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => ReviewHost(controller: c, child: child!),
+          home: const Scaffold(body: Text('home')),
+        ),
+      );
+      c.showRatingModalForExit();
+      t = t.add(const Duration(seconds: 3));
       c.showRatingModalForExit();
       await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('review_exit_app')));
-      await tester.pump();
-      expect(exited, 1);
-      expect(c.ratingModalVisible, isFalse);
-    });
-
-    testWidgets('Android back closes the modal first', (tester) async {
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      final handled = await tester.binding.handlePopRoute();
-      await tester.pump();
-      expect(handled, isTrue);
-      expect(c.ratingModalVisible, isFalse);
-    });
-
-    testWidgets('dismiss during store redirect cancels the redirect', (tester) async {
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('review_star_5')));
-      await tester.pump();
-      final handled = await tester.binding.handlePopRoute();
-      await tester.pump();
-      expect(handled, isTrue);
-      expect(c.ratingModalVisible, isFalse);
-      expect(find.byType(RatingModal), findsNothing);
+      expect(log, isEmpty);
+      expect(c.exitHintTick, 2);
       await tester.pump(const Duration(seconds: 3));
-      expect(storeOpened, 0);
     });
 
-    testWidgets('narrow screen: star row fits without overflow', (tester) async {
-      tester.view.physicalSize = const Size(300, 640);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      await pumpHost(tester);
-      c.showRatingModal();
-      await tester.pump();
-      expect(tester.takeException(), isNull);
-    });
+    testWidgets(
+      'host records exactly one session per launch and exposes the scope',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final c = ReviewController(exitApp: () {});
+        addTearDown(c.dispose);
+        ReviewController? seen;
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) =>
+                ReviewHost(controller: c, child: child!),
+            home: Builder(
+              builder: (context) {
+                seen = ReviewScope.maybeOf(context);
+                return const Text('page');
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(seen, same(c));
+        await c.recordSessionOnce();
+        expect(await c.store.sessionCount(), 1);
+      },
+    );
   });
 }

@@ -6,13 +6,14 @@ import '../../core/api/api_client.dart';
 import '../../core/services/cricket_services.dart';
 import '../../core/utils/match_transform.dart';
 import '../common/match_parsing.dart';
+import 'match_filters.dart';
 
 enum MatchesTab { live, upcoming, completed }
 
 const completedPageSize = 10;
 
 String matchesErrorMessage(Object e) =>
-    e is ApiException && e.message.trim().isNotEmpty ? friendlyError(e) : 'Failed to load';
+    e is ApiException && e.message.trim().isNotEmpty ? friendlyError(e) : 'Something went wrong on our side.';
 
 /// RN: `info ? info.page * info.perPage < info.total : newList.length >= PAGE_SIZE`.
 bool computeHasMore(PageInfo? info, int received, {int pageSize = completedPageSize}) =>
@@ -34,6 +35,20 @@ class MatchesController extends ChangeNotifier {
   TabData operator [](MatchesTab t) => tabs[t]!;
 
   bool refreshing = false;
+
+  /// Client-side filters (format, women, day). Changing them never sends a
+  /// request; panels re-filter the loaded lists.
+  MatchFilters filters = const MatchFilters();
+
+  void setFilters(MatchFilters f) {
+    if (f == filters) return;
+    filters = f;
+    _notify();
+  }
+
+  /// The Women chip is offered only when the loaded data contains women's
+  /// matches (see [isWomenMatch] for the rule).
+  bool get womenAvailable => tabs.values.any((d) => d.matches.any(isWomenMatch));
 
   // Completed pagination.
   int completedPage = 1;
@@ -61,12 +76,12 @@ class MatchesController extends ChangeNotifier {
 
   /// /match/live, falling back to /match/recent filtered to live matches.
   Future<void> fetchLive() => _run(MatchesTab.live, () async {
-        try {
-          return parseMatchList((await _s.getLiveMatches()).data);
-        } catch (_) {
-          return parseMatchList((await _s.getRecentMatches()).data).where((m) => m.isLive).toList();
-        }
-      });
+    try {
+      return parseMatchList((await _s.getLiveMatches()).data);
+    } catch (_) {
+      return parseMatchList((await _s.getRecentMatches()).data).where((m) => m.isInProgress).toList();
+    }
+  });
 
   Future<void> _run(MatchesTab tab, Future<List<MatchSummary>> Function() load) async {
     final gen = _bump(tab);

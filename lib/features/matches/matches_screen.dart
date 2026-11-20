@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/motion/motion.dart';
 import '../../core/router/app_nav.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/match_transform.dart';
@@ -7,18 +8,17 @@ import '../../core/widgets/tabs.dart';
 import '../../core/widgets/titles.dart';
 import '../ads/ads.dart';
 import '../common/tap_guard.dart';
+import 'feature_states.dart';
 import 'matches_controller.dart';
+import 'matches_filter_bar.dart';
 import 'matches_tab_panel.dart';
 
-const _tabItems = [
-  SectionTabItem('live', 'Live'),
-  SectionTabItem('upcoming', 'Upcoming'),
-  SectionTabItem('completed', 'Recent'),
-];
+const _tabItems = [SectionTabItem('live', 'Live'), SectionTabItem('upcoming', 'Upcoming'), SectionTabItem('completed', 'Results')];
 const _tabOrder = MatchesTab.values; // live, upcoming, completed
 
-/// Ported from RN `MatchesScreen`: swipeable Live / Upcoming / Recent pages
-/// (RN PagerView → PageView), grouped by series, paginated "Recent".
+/// Matches tab: Live / Upcoming / Results pages (swipeable), a day strip and
+/// format chips that filter the loaded lists client-side, rows grouped by
+/// series under sticky headers, paginated Results, pull-to-refresh.
 class MatchesScreen extends StatefulWidget {
   const MatchesScreen({super.key});
 
@@ -40,12 +40,16 @@ class _MatchesScreenState extends State<MatchesScreen> {
     super.dispose();
   }
 
-  // Tab tap → animate pager; index state follows onPageChanged.
+  void _showTab(MatchesTab t) {
+    final i = _tabOrder.indexOf(t);
+    if (i < 0 || i == _index) return;
+    setState(() => _index = i); // indicator moves immediately
+    _pager.animateToPage(i, duration: Motion.of(context).d(Motion.tabSwitch), curve: Motion.standard);
+  }
+
   void _onTabSelect(String key) {
     final i = _tabOrder.indexWhere((t) => t.name == key);
-    if (i < 0 || i == _index) return;
-    setState(() => _index = i); // underline moves immediately
-    _pager.animateToPage(i, duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic);
+    if (i >= 0) _showTab(_tabOrder[i]);
   }
 
   void _openMatch(MatchSummary m) {
@@ -57,15 +61,36 @@ class _MatchesScreenState extends State<MatchesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Content clears the floating tab bar (shell inset) + fixed banner reserve.
-    final bottomPad = MediaQuery.paddingOf(context).bottom + 60 + Spacing.md;
     return Material(
-      color: AppColors.bg,
-      child: Stack(children: [
-        Column(children: [
-          const ScreenTitle(title: 'Matches'),
+      color: context.palette.canvas,
+      child: Column(
+        children: [
+          ScreenTitle(
+            title: 'Matches',
+            actions: [
+              IconButton(
+                key: const ValueKey('matches_search'),
+                tooltip: 'Search matches, series and players',
+                onPressed: () => _guard.run(() {
+                  AppNav.search(context);
+                }),
+                icon: Icon(Icons.search, color: context.palette.ink),
+              ),
+            ],
+          ),
           const ScreenBannerSlots(screen: 'matches', onlyPosition: 'top'),
-          SectionTabs(tabs: _tabItems, activeKey: _tabOrder[_index].name, onSelect: _onTabSelect),
+          MaxWidthBand(
+            child: SectionTabs(tabs: _tabItems, activeKey: _tabOrder[_index].name, onSelect: _onTabSelect),
+          ),
+          ListenableBuilder(
+            listenable: _c,
+            builder: (context, _) => MatchesFilterBar(
+              filters: _c.filters,
+              onChanged: _c.setFilters,
+              showDays: _tabOrder[_index] != MatchesTab.live,
+              showWomen: _c.womenAvailable,
+            ),
+          ),
           Expanded(
             child: PageView(
               key: const ValueKey('matches_pager'),
@@ -80,14 +105,14 @@ class _MatchesScreenState extends State<MatchesScreen> {
                     tab: t,
                     controller: _c,
                     onMatchTap: _openMatch,
-                    bottomPadding: bottomPad,
+                    onShowTab: _showTab,
                   ),
               ],
             ),
           ),
-        ]),
-        Positioned(left: 0, right: 0, bottom: MediaQuery.paddingOf(context).bottom, child: const FixedBottomBanner(screen: 'matches')),
-      ]),
+          const FixedBottomBanner(screen: 'matches'),
+        ],
+      ),
     );
   }
 }

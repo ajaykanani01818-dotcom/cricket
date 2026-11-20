@@ -11,7 +11,12 @@ import 'version_gate.dart';
 /// Provides [ReviewScope] (rating prompt) to every screen and the (currently
 /// inert) version update gate on top.
 class AppChrome extends StatelessWidget {
-  const AppChrome({super.key, required this.child, this.reviewController, this.versionGate = versionGateConfig});
+  const AppChrome({
+    super.key,
+    required this.child,
+    this.reviewController,
+    this.versionGate = versionGateConfig,
+  });
 
   final Widget child;
 
@@ -21,7 +26,7 @@ class AppChrome extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => VersionUpdateGate(
-        config: versionGate,
-        child: ReviewHost(controller: reviewController, child: child),
-      );
+    config: versionGate,
+    child: ReviewHost(controller: reviewController, child: child),
+  );
 }

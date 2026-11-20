@@ -2,18 +2,14 @@ import 'dart:async';
 
 import 'package:crickbex/core/api/api_client.dart';
 import 'package:crickbex/core/services/cricket_services.dart';
-import 'package:crickbex/features/common/favorites.dart';
-import 'package:crickbex/features/common/hero_banner.dart';
 import 'package:crickbex/features/common/match_parsing.dart';
 import 'package:crickbex/features/common/match_time.dart';
-import 'package:crickbex/features/common/popular_series.dart';
 import 'package:crickbex/features/common/series_resolver.dart';
 import 'package:crickbex/features/common/tap_guard.dart';
 import 'package:crickbex/features/common/upcoming_match_card.dart';
 import 'package:crickbex/features/common/visible_poller.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'helpers.dart';
 
@@ -101,31 +97,6 @@ void main() {
     });
   });
 
-  group('popular series', () {
-    test('acronym', () {
-      expect(seriesAcronym('Big Bash League 2026-27'), 'BBL2');
-      expect(seriesAcronym('IPL'), 'IPL');
-      expect(seriesAcronym('Ashes'), 'ASH');
-      expect(seriesAcronym('   '), '?');
-    });
-
-    test('parse list or {series:[...]}, skipping incomplete rows, max 10', () {
-      final rows = [
-        for (var i = 0; i < 12; i++) {'name': 'Series $i', 'sb_series_key': 'k$i'},
-      ];
-      expect(parsePopularSeries(rows), hasLength(10));
-      expect(parsePopularSeries({'series': rows.take(2).toList()}).map((e) => e.key), ['k0', 'k1']);
-      expect(parsePopularSeries([{'name': 'No key'}, {'_id': 'x'}, {'name': 'Ok', '_id': 'id1'}]).single.key, 'id1');
-      expect(parsePopularSeries(null), isEmpty);
-    });
-
-    test('loadPopularSeries returns [] on failure', () async {
-      final api = FakeApi({'/series': FakeApi.status(500)})..install();
-      expect(await loadPopularSeries(MatchService.instance), isEmpty);
-      expect(api.count('/series'), 1);
-    });
-  });
-
   group('resolveSeriesId', () {
     test('null without candidates', () async {
       FakeApi().install();
@@ -170,42 +141,6 @@ void main() {
     await g.run(() => runs++);
     expect(runs, 2);
     expect(TapGuard().busy, isFalse);
-  });
-
-  group('FavoritesController', () {
-    setUp(() {
-      SharedPreferences.setMockInitialValues({});
-      FavoritesController.instance.debugReset();
-    });
-
-    test('toggle persists and reloads', () async {
-      final f = FavoritesController.instance;
-      await f.load();
-      await f.toggle('ind');
-      expect(f.isFavorite('ind'), isTrue);
-      f.debugReset();
-      await f.load();
-      expect(f.isFavorite('ind'), isTrue);
-      await f.toggle('ind');
-      expect(f.isFavorite('ind'), isFalse);
-      await f.toggle('');
-      expect(f.favorites, isEmpty);
-    });
-  });
-
-  test('buildHeroSlides order: live/recent, 2 upcoming, players', () {
-    final recent = parseMatchList(fixtureJson('match_recent')['data']).take(2).toList();
-    final live = parseMatchList([liveMatchJson()]);
-    final up = parseMatchList(fixtureJson('match_upcoming')['data']);
-    final slides = buildHeroSlides([...live, ...recent], up, const [HeroPlayer(format: 'ODI', playerKey: 'p', name: 'P')]);
-    expect(slides.map((s) => s.type), [
-      HeroSlideType.live,
-      HeroSlideType.recent,
-      HeroSlideType.recent,
-      HeroSlideType.upcoming,
-      HeroSlideType.upcoming,
-      HeroSlideType.player,
-    ]);
   });
 
   group('VisiblePoller', () {

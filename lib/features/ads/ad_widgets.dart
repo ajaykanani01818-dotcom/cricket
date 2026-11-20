@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -11,14 +12,21 @@ import 'ads_manager.dart';
 const double kFixedBottomReserve = 60;
 
 /// Listens to everything that decides whether an ad may render.
-Listenable _adsListenable(AdsManager m) => Listenable.merge([m.adsReady, m.noAds.active]);
+Listenable _adsListenable(AdsManager m) =>
+    Listenable.merge([m.adsReady, m.noAds.active]);
 
 /// Config-driven banner for one screen + position (RN `ScreenBannerAd`).
 ///
-/// Renders nothing until the SDK is ready; reserves the banner footprint while
-/// loading so the layout does not jump; collapses to zero height on no fill.
+/// Renders nothing (zero height) until an ad has actually loaded, and on
+/// no-fill, no-ads or web.
 class ScreenBannerAd extends StatefulWidget {
-  const ScreenBannerAd({super.key, required this.screen, required this.position, this.fullBleed = false, this.manager});
+  const ScreenBannerAd({
+    super.key,
+    required this.screen,
+    required this.position,
+    this.fullBleed = false,
+    this.manager,
+  });
   final String screen;
   final String position;
   final bool fullBleed;
@@ -38,7 +46,9 @@ class _ScreenBannerAdState extends State<ScreenBannerAd> {
   late final Listenable _listenable = _adsListenable(_m);
 
   bool get _shouldShow =>
-      _m.adsReady.value && !_m.noAds.isActiveSync && _m.config.isBannerPositionEnabled(widget.screen, widget.position);
+      _m.adsReady.value &&
+      !_m.noAds.isActiveSync &&
+      _m.config.isBannerPositionEnabled(widget.screen, widget.position);
 
   @override
   void initState() {
@@ -75,11 +85,18 @@ class _ScreenBannerAdState extends State<ScreenBannerAd> {
     if (_loading || !mounted) return;
     _loading = true;
     final pad = widget.fullBleed ? 0.0 : 16.0;
-    final width = (MediaQuery.sizeOf(context).width - pad).floor().clamp(32, 4000);
+    final width = (MediaQuery.sizeOf(context).width - pad).floor().clamp(
+      32,
+      4000,
+    );
     final orientation = MediaQuery.orientationOf(context);
     LoadedBanner? next;
     try {
-      next = await _m.backend.loadBanner(adUnitId: _m.ids.adaptiveBanner, width: width, orientation: orientation);
+      next = await _m.backend.loadBanner(
+        adUnitId: _m.ids.adaptiveBanner,
+        width: width,
+        orientation: orientation,
+      );
     } catch (_) {
       next = null;
     }
@@ -113,27 +130,27 @@ class _ScreenBannerAdState extends State<ScreenBannerAd> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_shouldShow || _failed) return const SizedBox.shrink();
+    if (kIsWeb || !_shouldShow || _failed) return const SizedBox.shrink();
     final banner = _banner;
-    if (banner == null) {
-      // Reserve ~adaptive banner height while loading (RN slot reserve).
-      return SizedBox(
-        key: ValueKey('ads_banner_reserve_${widget.screen}_${widget.position}'),
-        height: widget.fullBleed ? 56 : 52 + 12,
-        width: double.infinity,
-        child: ColoredBox(color: widget.fullBleed ? Colors.transparent : AppColors.white),
-      );
-    }
+    // No loaded ad → the slot takes ZERO space (no reserved blank gap while
+    // loading or after a no-fill; the layout shifts once when an ad arrives).
+    if (banner == null) return const SizedBox.shrink();
     return Container(
       key: ValueKey('ads_banner_${widget.screen}_${widget.position}'),
       width: double.infinity,
       color: widget.fullBleed ? null : AppColors.white,
-      padding: widget.fullBleed ? EdgeInsets.zero : const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+      padding: widget.fullBleed
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
       // heightFactor: 1 → the slot is exactly the banner's height (an
       // unbounded `alignment` would fill a Stack and cover the screen).
       child: Center(
         heightFactor: 1,
-        child: SizedBox(width: banner.size.width, height: banner.size.height, child: banner.build()),
+        child: SizedBox(
+          width: banner.size.width,
+          height: banner.size.height,
+          child: banner.build(),
+        ),
       ),
     );
   }
@@ -142,7 +159,12 @@ class _ScreenBannerAdState extends State<ScreenBannerAd> {
 /// Inline banner slot(s) for a screen (RN `ScreenBannerSlots`). With
 /// [onlyPosition] renders that slot only; otherwise every configured position.
 class ScreenBannerSlots extends StatelessWidget {
-  const ScreenBannerSlots({super.key, required this.screen, this.onlyPosition, this.fullBleed = false});
+  const ScreenBannerSlots({
+    super.key,
+    required this.screen,
+    this.onlyPosition,
+    this.fullBleed = false,
+  });
   final String screen;
   final String? onlyPosition;
   final bool fullBleed;
@@ -153,14 +175,32 @@ class ScreenBannerSlots extends StatelessWidget {
     return ListenableBuilder(
       listenable: m.adsReady,
       builder: (context, _) {
-        if (!m.adsReady.value || !m.config.isBannerEnabled(screen)) return const SizedBox.shrink();
-        final positions = onlyPosition != null ? [onlyPosition!] : m.config.bannerPositionsFor(screen);
-        if (positions.length == 1) {
-          return ScreenBannerAd(key: ValueKey('${screen}_${positions.first}'), screen: screen, position: positions.first, fullBleed: fullBleed);
+        if (!m.adsReady.value || !m.config.isBannerEnabled(screen)) {
+          return const SizedBox.shrink();
         }
-        return Column(mainAxisSize: MainAxisSize.min, children: [
-          for (final p in positions) ScreenBannerAd(key: ValueKey('${screen}_$p'), screen: screen, position: p, fullBleed: fullBleed),
-        ]);
+        final positions = onlyPosition != null
+            ? [onlyPosition!]
+            : m.config.bannerPositionsFor(screen);
+        if (positions.length == 1) {
+          return ScreenBannerAd(
+            key: ValueKey('${screen}_${positions.first}'),
+            screen: screen,
+            position: positions.first,
+            fullBleed: fullBleed,
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final p in positions)
+              ScreenBannerAd(
+                key: ValueKey('${screen}_$p'),
+                screen: screen,
+                position: p,
+                fullBleed: fullBleed,
+              ),
+          ],
+        );
       },
     );
   }
@@ -181,11 +221,16 @@ class FixedBottomBanner extends StatelessWidget {
     return ListenableBuilder(
       listenable: m.adsReady,
       builder: (context, _) {
-        if (!m.adsReady.value || !m.config.isBannerPositionEnabled(screen, 'bottom')) return const SizedBox.shrink();
+        if (!m.adsReady.value ||
+            !m.config.isBannerPositionEnabled(screen, 'bottom')) {
+          return const SizedBox.shrink();
+        }
         return Align(
           alignment: Alignment.bottomCenter,
           child: Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.paddingOf(context).bottom),
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.paddingOf(context).bottom,
+            ),
             child: ScreenBannerAd(screen: screen, position: 'bottom'),
           ),
         );
@@ -213,7 +258,10 @@ class _ListNativeAdState extends State<ListNativeAd> {
   bool _disposed = false;
   late final Listenable _listenable = _adsListenable(_m);
 
-  bool get _shouldShow => _m.adsReady.value && !_m.noAds.isActiveSync && _m.config.isNativeEnabled(widget.placement);
+  bool get _shouldShow =>
+      _m.adsReady.value &&
+      !_m.noAds.isActiveSync &&
+      _m.config.isNativeEnabled(widget.placement);
 
   @override
   void initState() {
@@ -258,65 +306,63 @@ class _ListNativeAdState extends State<ListNativeAd> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_shouldShow || _failed) return const SizedBox.shrink();
+    if (kIsWeb || !_shouldShow || _failed) return const SizedBox.shrink();
     final ad = _ad;
-    if (ad == null) {
-      // Same outer footprint as a loaded card — no spinner, avoids list jump.
-      return Container(
-        key: ValueKey('ads_native_reserve_${widget.placement}'),
-        margin: const EdgeInsets.symmetric(vertical: 12),
-        height: 120,
-        decoration: BoxDecoration(color: AppColors.bg, borderRadius: BorderRadius.circular(18)),
-      );
-    }
+    if (ad == null) return const SizedBox.shrink();
+    final p = context.palette;
     return Container(
       key: ValueKey('ads_native_${widget.placement}'),
       margin: const EdgeInsets.symmetric(vertical: 12),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border),
-        boxShadow: const [BoxShadow(color: Color(0x1A0860C4), blurRadius: 12, offset: Offset(0, 5))],
+        color: p.surface,
+        borderRadius: BorderRadius.circular(Radii.card),
+        border: Border.all(color: p.hairline),
       ),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Container(
-          height: 4,
-          decoration: const BoxDecoration(gradient: LinearGradient(colors: [AppColors.pitchLight, AppColors.pitch])),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-          child: Row(children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: AppColors.pitch.withValues(alpha: 0.07),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: AppColors.pitch.withValues(alpha: 0.17)),
-              ),
-              child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.campaign_outlined, size: 12, color: AppColors.pitch),
-                SizedBox(width: 5),
-                Text('Sponsored', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.pitch, letterSpacing: 0.3)),
-              ]),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
+            child: Row(
+              children: [
+                Text(
+                  'Sponsored',
+                  style: AppFont.style(
+                    size: 12,
+                    weight: FontWeight.w700,
+                    color: p.inkMuted,
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(Radii.xs),
+                    border: Border.all(color: p.hairline),
+                  ),
+                  child: Text(
+                    'Ad',
+                    style: AppFont.style(
+                      size: 12,
+                      weight: FontWeight.w700,
+                      color: p.inkMuted,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.card,
-                borderRadius: BorderRadius.circular(Radii.full),
-                border: Border.all(color: AppColors.borderSubtle),
-              ),
-              child: const Text('Ad', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textMuted, letterSpacing: 0.3)),
-            ),
-          ]),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
-          child: SizedBox(height: ad.height, child: ad.build()),
-        ),
-      ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+            child: SizedBox(height: ad.height, child: ad.build()),
+          ),
+        ],
+      ),
     );
   }
 }

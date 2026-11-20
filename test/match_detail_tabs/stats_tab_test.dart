@@ -1,6 +1,7 @@
+import 'package:crickbex/core/api/json.dart';
 import 'package:crickbex/core/services/cricket_services.dart';
-import 'package:crickbex/features/match_detail/tabs/match_section_title.dart';
 import 'package:crickbex/features/match_detail/tabs/stats_tab.dart';
+import 'package:crickbex/features/match_detail/tabs/tab_scorecard_parse.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -15,39 +16,54 @@ http.Response? statsRoute(http.Request r) {
   return null;
 }
 
+ScorecardView scorecard() => parseScorecard(J.map(fixture('match_scorecard')['data']));
+
 void main() {
   final original = MatchService.instance;
   tearDown(() => MatchService.instance = original);
 
-  testWidgets('loading → values from the real fixtures', (tester) async {
+  testWidgets('loading → comparison table, charts with text equivalents, economy bars', (tester) async {
     final calls = installService(statsRoute);
-    await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: false)));
+    await tester.pumpWidget(host(MatchStatsTab(matchId: 'm1', isLive: false, scorecard: scorecard())));
     expect(find.byKey(const ValueKey('stats_loading')), findsOneWidget);
-    expect(find.text('Loading statistics...'), findsOneWidget);
     await tester.pump();
     await tester.pump();
     expect(calls.toSet(), {'/match/m1/analytics', '/match/m1/scoring-rate', '/match/m1/boundaries'});
-    expect(find.text('Scoring Rate'), findsOneWidget);
+    expect(find.text('BAN 1st'), findsWidgets);
     expect(find.text('4.63'), findsOneWidget);
     expect(find.text('3.95'), findsOneWidget);
-    expect(find.text('36'), findsOneWidget);
-    expect(find.text('52'), findsOneWidget);
-    expect(find.text('61.2%'), findsOneWidget);
-    expect(find.text('66.5%'), findsOneWidget);
-    expect(find.byType(MatchSectionTitle), findsNWidgets(3));
+    expect(find.text('66.5'), findsOneWidget);
+    // Latest innings selected; wickets from the scorecard fall of wickets.
+    expect(find.byKey(const ValueKey('stats_manhattan_t1_1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('stats_worm_t1_1')), findsOneWidget);
+    expect(find.textContaining('Highest over:'), findsOneWidget);
+    expect(find.textContaining('Wickets in overs 2, 44'), findsOneWidget);
+    expect(find.textContaining('after 10'), findsOneWidget);
+    expect(find.text('61.2% (232 of 379 balls)'), findsOneWidget);
+    expect(find.text('37 (36 fours, 1 six)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('stats_economy_t1_1')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('stats_innings_0')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('stats_manhattan_t2_1')), findsOneWidget);
+
+    // Tapping a bar reads the over out.
+    await tester.tapAt(tester.getTopLeft(find.byKey(const ValueKey('stats_manhattan_t2_1'))) + const Offset(40, 120));
+    await tester.pump();
+    expect(find.textContaining(RegExp(r'^Over \d+: \d+ runs, total \d+')), findsOneWidget);
   });
 
-  testWidgets('one endpoint failing still renders (zeros for it)', (tester) async {
+  testWidgets('one endpoint failing: its figures show as not available, never 0', (tester) async {
     installService((r) => r.url.path.endsWith('/boundaries') ? serverError() : statsRoute(r));
     await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: false)));
     await tester.pump();
     await tester.pump();
-    expect(find.byKey(const ValueKey('stats_error')), findsNothing);
     expect(find.text('4.63'), findsOneWidget);
-    expect(find.text('0'), findsNWidgets(6));
+    expect(find.text('–'), findsWidgets);
+    expect(find.byKey(const ValueKey('stats_boundaries')), findsNothing);
   });
 
-  testWidgets('all endpoints failing → error; Retry recovers', (tester) async {
+  testWidgets('all endpoints failing → error + retry recovers', (tester) async {
     var fail = true;
     installService((r) => fail ? serverError() : statsRoute(r));
     await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: false)));
@@ -55,79 +71,46 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('stats_error')), findsOneWidget);
     fail = false;
-    await tester.tap(find.byKey(const ValueKey('empty_state_action')));
+    await tester.tap(find.text('Try again'));
     await tester.pump();
     await tester.pump();
-    expect(find.text('4.63'), findsOneWidget);
+    expect(find.byKey(const ValueKey('stats_body')), findsOneWidget);
   });
 
-  testWidgets('live polling refreshes values every 15s and stops on dispose', (tester) async {
-    var rate = 4.63;
-    final calls = installService((r) {
-      if (r.url.path.endsWith('/scoring-rate')) {
-        return okJson({
-          'data': {
-            'teams': {
-              'team1': {
-                'innings': {
-                  't1_1': {'scoringRate': rate}
-                }
-              }
-            }
-          }
-        });
-      }
-      return statsRoute(r);
-    });
+  testWidgets('empty payloads → not available state', (tester) async {
+    installService((r) => okJson({'message': 'ok', 'data': {}}));
+    await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: false)));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('stats_empty')), findsOneWidget);
+  });
+
+  testWidgets('live: polls silently every 30 s; not live: no polling', (tester) async {
+    final calls = installService(statsRoute);
     await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: true)));
     await tester.pump();
     await tester.pump();
-    expect(find.text('4.63'), findsOneWidget);
-    rate = 5.1;
-    await tester.pump(const Duration(seconds: 15));
+    expect(calls.length, 3);
+    await tester.pump(const Duration(seconds: 30));
     await tester.pump();
-    expect(find.text('5.10'), findsOneWidget);
+    expect(calls.length, 6);
     expect(find.byKey(const ValueKey('stats_loading')), findsNothing);
-    expect(calls, hasLength(6));
-    await tester.pumpWidget(const SizedBox());
-    await tester.pump(const Duration(seconds: 60));
-    expect(calls, hasLength(6));
-  });
-
-  testWidgets('works inside a parent scroll view', (tester) async {
-    installService(statsRoute);
-    await tester.pumpWidget(scrollHost(const MatchStatsTab(matchId: 'm1', isLive: false)));
-    await tester.pump();
-    await tester.pump();
-    expect(tester.takeException(), isNull);
-    expect(find.text('Dot Ball Percentage'), findsOneWidget);
+    await tester.pumpWidget(host(const MatchStatsTab(matchId: 'm1', isLive: false)));
+    await tester.pump(const Duration(minutes: 2));
+    expect(calls.length, 6);
   });
 
   test('loadMatchStats rethrows only when all three fail', () async {
+    installService((r) => r.url.path.endsWith('/analytics') ? serverError() : statsRoute(r));
+    final v = await loadMatchStats(MatchService.instance, 'm1');
+    expect(v.innings, hasLength(2));
+    expect(v.innings.first.dotPercent, isNull);
     installService((r) => serverError());
-    await expectLater(loadMatchStats(MatchService.instance, 'x'), throwsA(anything));
-    installService((r) => r.url.path.endsWith('/analytics') ? statsRoute(r) : serverError());
-    final v = await loadMatchStats(MatchService.instance, 'x');
-    expect(v.dotBall1, '61.2%');
-    expect(v.scoringRate1, '0.00');
+    expect(loadMatchStats(MatchService.instance, 'm1'), throwsA(anything));
   });
 
-  testWidgets('MatchSectionTitle variants render; currentOver pulses', (tester) async {
-    await tester.pumpWidget(host(const Column(children: [
-      MatchSectionTitle(icon: Icons.bar_chart, label: 'Default'),
-      MatchSectionTitle(icon: Icons.sports_cricket, label: 'Stat', variant: 'stat'),
-      MatchSectionTitle(icon: Icons.bolt, label: 'Current over', variant: 'currentOver'),
-    ])));
-    expect(find.text('Default'), findsOneWidget);
-    expect(find.text('Stat'), findsOneWidget);
-    expect(find.byType(FadeTransition), findsWidgets);
-    final fade = tester.widget<FadeTransition>(
-        find.descendant(of: find.byType(MatchSectionTitle).last, matching: find.byType(FadeTransition)));
-    final o1 = fade.opacity.value;
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(fade.opacity.value, isNot(o1));
-    // Switching away from currentOver stops the animation.
-    await tester.pumpWidget(host(const MatchSectionTitle(icon: Icons.bolt, label: 'x')));
-    expect(find.descendant(of: find.byType(MatchSectionTitle), matching: find.byType(FadeTransition)), findsNothing);
+  test('text equivalents', () {
+    expect(manhattanSummary([2, 18, 4], [2]), 'Highest over: 18 runs (over 2). 24 runs in 3 overs. Wickets in overs 2.');
+    expect(wormSummary([1, 2, 3]), '6 runs after 3 overs.');
   });
 }

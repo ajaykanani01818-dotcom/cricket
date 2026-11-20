@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Launch screen: brand blue + CrickBex logo (matches the in-app SplashScreen). -->
+    <!-- Launch screen (pre-Android 12): dark canvas #17130F + centred logo. -->
     <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
         <item name="android:windowBackground">@drawable/launch_background</item>
         <item name="android:statusBarColor">@color/splash_background</item>
         <item name="android:navigationBarColor">@color/splash_background</item>
     </style>
-    <!-- Window color behind the Flutter UI once it has drawn its first frame. -->
+    <!-- Window colour behind the Flutter UI until its first frame: the theme canvas,
+         never white, so there is no flash. -->
     <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <item name="android:windowBackground">@color/app_canvas</item>
     </style>
 </resources>

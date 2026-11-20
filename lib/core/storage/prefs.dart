@@ -14,7 +14,9 @@ class AppPrefs {
       (await SharedPreferences.getInstance()).setBool(_onboardingSeen, true);
 
   static Future<Set<String>> favorites() async =>
-      ((await SharedPreferences.getInstance()).getStringList(_favorites) ?? const []).toSet();
+      ((await SharedPreferences.getInstance()).getStringList(_favorites) ??
+              const [])
+          .toSet();
 
   static Future<bool> toggleFavorite(String id) async {
     final prefs = await SharedPreferences.getInstance();
@@ -25,11 +27,16 @@ class AppPrefs {
     return added;
   }
 
-  static Future<int?> getInt(String key) async => (await SharedPreferences.getInstance()).getInt(key);
-  static Future<void> setInt(String key, int value) async => (await SharedPreferences.getInstance()).setInt(key, value);
-  static Future<bool?> getBool(String key) async => (await SharedPreferences.getInstance()).getBool(key);
-  static Future<void> setBool(String key, bool value) async => (await SharedPreferences.getInstance()).setBool(key, value);
-  static Future<String?> getString(String key) async => (await SharedPreferences.getInstance()).getString(key);
+  static Future<int?> getInt(String key) async =>
+      (await SharedPreferences.getInstance()).getInt(key);
+  static Future<void> setInt(String key, int value) async =>
+      (await SharedPreferences.getInstance()).setInt(key, value);
+  static Future<bool?> getBool(String key) async =>
+      (await SharedPreferences.getInstance()).getBool(key);
+  static Future<void> setBool(String key, bool value) async =>
+      (await SharedPreferences.getInstance()).setBool(key, value);
+  static Future<String?> getString(String key) async =>
+      (await SharedPreferences.getInstance()).getString(key);
   static Future<void> setString(String key, String value) async =>
       (await SharedPreferences.getInstance()).setString(key, value);
 }

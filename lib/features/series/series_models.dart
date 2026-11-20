@@ -1,40 +1,63 @@
 import 'package:intl/intl.dart';
 
 import '../../core/api/json.dart';
-import '../../core/utils/fixture_status.dart';
+import '../../core/utils/match_transform.dart';
+import '../common/match_parsing.dart';
+import '../matches/match_filters.dart';
 
-/// View-models + parsers for the Series tab and Series Detail screen.
-/// Ported from RN `SeriesScreen.tsx` / `SeriesDetailScreen.tsx` helpers.
+/// View-models + parsers for the Series list and the series hub.
 /// Everything here is pure (no Flutter) and parsed ONCE when data arrives.
+///
+/// Data rules: values the provider leaves out are shown as "–" or hidden,
+/// never as 0; standings come from the provider only (no computed
+/// qualification, PRD §10).
 
-/// RN `getNativeConfig('series_list' | 'series_detail').interval` defaults (adsConfig.ts).
+/// RN `getNativeConfig('series_list' | 'series_detail').interval` defaults.
 const int kSeriesNativeAdInterval = 3;
+
+/// Shown for a value the provider did not send.
+const kNotAvailable = '–';
 
 // ───────────────────────── Series list ─────────────────────────
 
 enum SeriesStatusKey { ongoing, upcoming, completed }
 
-/// RN `toStatusKey`.
 SeriesStatusKey? toSeriesStatusKey(String? status) {
-  switch ((status ?? '').toUpperCase()) {
+  switch ((status ?? '').trim().toUpperCase()) {
     case 'ONGOING':
+    case 'LIVE':
+    case 'RUNNING':
       return SeriesStatusKey.ongoing;
     case 'UPCOMING':
+    case 'NOT_STARTED':
       return SeriesStatusKey.upcoming;
     case 'COMPLETED':
+    case 'FINISHED':
       return SeriesStatusKey.completed;
   }
   return null;
 }
 
-/// RN `formatDateRange`: "Oct 2 – Nov 21" (local time), '' if either date is missing/invalid.
+String seriesStatusLabel(SeriesStatusKey s) => switch (s) {
+  SeriesStatusKey.ongoing => 'Ongoing',
+  SeriesStatusKey.upcoming => 'Upcoming',
+  SeriesStatusKey.completed => 'Completed',
+};
+
+/// "2 Oct – 21 Nov 2026" (local time); the start keeps its year only when
+/// it differs. '' if either date is missing/invalid.
 String formatSeriesDateRange(String? startDate, String? endDate) {
-  if (startDate == null || endDate == null || startDate.isEmpty || endDate.isEmpty) return '';
-  final s = DateTime.tryParse(startDate);
-  final e = DateTime.tryParse(endDate);
+  final s = DateTime.tryParse(startDate?.trim() ?? '')?.toLocal();
+  final e = DateTime.tryParse(endDate?.trim() ?? '')?.toLocal();
   if (s == null || e == null) return '';
-  final f = DateFormat('MMM d', 'en_US');
-  return '${f.format(s.toLocal())} – ${f.format(e.toLocal())}';
+  return formatDateSpan(s, e);
+}
+
+String formatDateSpan(DateTime s, DateTime e) {
+  final end = DateFormat('d MMM y', 'en_US').format(e);
+  if (s.year == e.year && s.month == e.month && s.day == e.day) return end;
+  final start = DateFormat(s.year == e.year ? 'd MMM' : 'd MMM y', 'en_US').format(s);
+  return '$start – $end';
 }
 
 class SeriesItem {
@@ -45,230 +68,151 @@ class SeriesItem {
     required this.status,
     required this.format,
     required this.dateRange,
+    this.year,
+    this.isPopular = false,
   });
 
   /// Stable list identity (`_id` → `sb_series_key` → `key`).
   final String id;
 
-  /// RN: `sb_series_key || _id || key` — what SeriesDetail is opened with.
+  /// `sb_series_key || _id || key`: what the series hub is opened with.
   final String navId;
   final String name;
   final SeriesStatusKey? status;
-  final String format; // upper-cased, '' when missing
+  final String format; // provider label ("T20", "Test"), '' when missing
   final String dateRange;
+
+  /// `year`, else the start date's year; null when neither is known.
+  final int? year;
+
+  /// Provider flag (data, not a follow).
+  final bool isPopular;
 
   bool get isLive => status == SeriesStatusKey.ongoing;
 
-  static SeriesItem? fromJson(JsonMap m, {int index = 0}) {
+  static SeriesItem fromJson(JsonMap m, {int index = 0}) {
     final navId = J.text(m['sb_series_key']) ?? J.text(m['_id']) ?? J.text(m['key']) ?? '';
     final id = J.text(m['_id']) ?? (navId.isNotEmpty ? navId : 'series-$index');
+    final start = DateTime.tryParse(J.str(m['startDate']).trim())?.toLocal();
+    final y = J.integer(m['year']);
     return SeriesItem(
       id: id,
       navId: navId,
-      name: J.text(m['name']) ?? '',
+      name: (J.text(m['name']) ?? '').trim(),
       status: toSeriesStatusKey(J.text(m['seriesStatus'])),
-      format: (J.text(m['format']) ?? '').toUpperCase(),
+      format: formatLabel((J.text(m['format']) ?? '').toUpperCase()) ?? '',
       dateRange: formatSeriesDateRange(J.text(m['startDate']), J.text(m['endDate'])),
+      year: (y != null && y > 1800 && y < 3000) ? y : start?.year,
+      isPopular: J.boolean(m['isPopular']),
     );
   }
 }
 
-/// RN loadTab: `data` is either a list or `{ series: [...] }`.
+/// `data` is either a list or `{ series: [...] }`.
 List<SeriesItem> parseSeriesList(dynamic data) {
   final raw = data is List ? data : J.map(data)['series'];
-  final out = <SeriesItem>[];
-  var i = 0;
-  for (final m in J.maps(raw)) {
-    final item = SeriesItem.fromJson(m, index: i++);
-    if (item != null) out.add(item);
-  }
-  return out;
+  final maps = J.maps(raw);
+  return [for (var i = 0; i < maps.length; i++) SeriesItem.fromJson(maps[i], index: i)];
 }
 
 // ───────────────────────── Fixtures ─────────────────────────
 
-/// RN `stripLeadingOrdinalFromTitle`.
-String stripLeadingOrdinalFromTitle(String raw) => raw
-    .replaceFirst(RegExp(r'^\s*\d{1,2}(st|nd|rd|th)\s+match\s*[:\-–,]?\s*', caseSensitive: false), '')
-    .replaceFirst(RegExp(r'^\s*match\s*no\.?\s*\d+\s*[:\-–,]?\s*', caseSensitive: false), '')
-    .replaceFirst(RegExp(r'^\s*\d{1,2}\s*[:\-–]\s*'), '')
-    .trim();
+/// Series fixtures, parsed with the shared match parser (same status rules
+/// as every other list), plus header facts derived from them.
+class SeriesFixturesData {
+  const SeriesFixturesData(this.matches);
+  final List<MatchSummary> matches;
 
-/// RN `normalizeFixtureFormat`: prefer real format labels (T20 / ODI / TEST).
-String? normalizeFixtureFormat(JsonMap f) {
-  final raw = f['format'] ?? f['matchFormat'] ?? f['type'] ?? f['gameType'] ?? f['seriesFormat'];
-  if (raw == null) return null;
-  final s = J.str(raw).trim();
-  if (s.isEmpty) return null;
-  final n = num.tryParse(s);
-  if (n != null && n.isFinite && n >= 1 && n <= 200 && !s.toUpperCase().contains('T')) {
-    if (n == 20) return 'T20';
-    if (n == 50) return 'ODI';
-    return null;
-  }
-  final u = s.toUpperCase();
-  if (u == '20' || RegExp(r'^T\s*20$', caseSensitive: false).hasMatch(s)) return 'T20';
-  if (u == '50' || u == 'ODI' || u == 'OD') return 'ODI';
-  if (u.contains('TEST')) return 'TEST';
-  if (u.contains('T20')) return 'T20';
-  return u.length <= 12 ? u : u.substring(0, 12);
-}
-
-String ordinalSuffix(int n) {
-  final j = n % 10, k = n % 100;
-  if (j == 1 && k != 11) return 'st';
-  if (j == 2 && k != 12) return 'nd';
-  if (j == 3 && k != 13) return 'rd';
-  return 'th';
-}
-
-enum FixtureChipVariant { upcoming, live, finished, cancelled, abandoned }
-
-/// RN `fixtureKindToSeriesStatusChip`.
-(String, FixtureChipVariant) fixtureStatusChip(FixtureCardKind kind) => switch (kind) {
-      FixtureCardKind.live => ('Live', FixtureChipVariant.live),
-      FixtureCardKind.completed => ('Finished', FixtureChipVariant.finished),
-      FixtureCardKind.cancelled => ('Cancelled', FixtureChipVariant.cancelled),
-      FixtureCardKind.abandoned => ('Abandoned', FixtureChipVariant.abandoned),
-      FixtureCardKind.scheduled => ('Upcoming', FixtureChipVariant.upcoming),
-    };
-
-/// One fixture row (RN `seriesFixtureToMatch` + `SeriesResultsMatchCard` derived values).
-class SeriesFixture {
-  const SeriesFixture({
-    required this.listKey,
-    required this.matchId,
-    required this.matchNumber,
-    required this.team1,
-    required this.team2,
-    this.team1Logo,
-    this.team2Logo,
-    required this.venue,
-    required this.date,
-    required this.kind,
-    required this.statusLine,
-    required this.chipLabel,
-    required this.chipVariant,
-    required this.finishedMessage,
-    required this.seriesLine,
-    this.format,
-    this.name,
-  });
-
-  final String listKey;
-  final String matchId; // sb_match_key || _id ('' = not tappable)
-  final int matchNumber; // 1-based
-  final String team1, team2;
-  final String? team1Logo, team2Logo;
-  final String venue;
-  final DateTime date;
-  final FixtureCardKind kind;
-  final String statusLine;
-  final String chipLabel;
-  final FixtureChipVariant chipVariant;
-  final String finishedMessage;
-  final String seriesLine;
-  final String? format;
-  final String? name;
-
-  bool get isCompleted => kind == FixtureCardKind.completed;
-  bool get isVoid => kind == FixtureCardKind.cancelled || kind == FixtureCardKind.abandoned;
-
-  /// RN UpcomingMatchCard variant: completed → 'completed', void → 'cancelled', else 'upcoming'.
-  bool get isUpcomingVariant => !isCompleted && !isVoid;
-
-  /// RN `showVoidDetailRow`.
-  bool get showVoidDetail {
-    const short = {'Cancelled', 'Abandoned', 'cancelled', 'abandoned'};
-    final s = statusLine.trim();
-    return isVoid && s.isNotEmpty && !short.contains(s);
-  }
-
-  static DateTime _resolveDate(JsonMap f, DateTime now) {
-    final startDate = f['startDate'];
-    if (startDate is String && startDate.length > 4) {
-      final d = DateTime.tryParse(startDate);
-      if (d != null) return d;
-    }
-    final alt = f['date'] ?? f['matchDate'] ?? f['startedAt'];
-    if (alt != null && J.str(alt).trim().length > 4) {
-      return DateTime.tryParse(J.str(alt).trim()) ?? now;
-    }
-    final ts = J.number(f['timestamp']);
-    if (ts != null) {
-      // Heuristic: ms vs s (completed fixtures sometimes omit startDate)
-      final ms = ts > 1e12 ? ts : ts * 1000;
-      return DateTime.fromMillisecondsSinceEpoch(ms.round(), isUtc: true);
-    }
-    return now;
-  }
-
-  static SeriesFixture fromJson(JsonMap f, {required int index, String? seriesTitle, DateTime? now}) {
-    final current = now ?? DateTime.now();
-    final id = J.text(f['sb_match_key']) ?? J.text(f['_id']) ?? '';
-    final date = _resolveDate(f, current);
-    final statusRaw = J.str(f['status']);
-    final resultMsg = J.str(J.at(f, 'result.message')).trim();
-    final disp = resolveSeriesFixtureDisplay(statusRaw, date.toUtc().toIso8601String(), resultMsg, current);
-    final rawName = J.str(f['name']).trim();
-    final titleFromRoute = seriesTitle?.trim() ?? '';
-    final seriesLine = titleFromRoute.isNotEmpty ? titleFromRoute : (rawName.isNotEmpty ? stripLeadingOrdinalFromTitle(rawName) : '');
-    final (chipLabel, chipVariant) = fixtureStatusChip(disp.kind);
-    final finished = resultMsg.isNotEmpty
-        ? resultMsg
-        : (disp.statusLine.trim().isNotEmpty ? disp.statusLine.trim() : 'Match completed');
-    return SeriesFixture(
-      listKey: J.text(f['_id']) ?? (id.isNotEmpty ? id : 'fixture-$index'),
-      matchId: id,
-      matchNumber: index + 1,
-      team1: J.text(J.at(f, 'teams.t1.name')) ?? 'TBD',
-      team2: J.text(J.at(f, 'teams.t2.name')) ?? 'TBD',
-      team1Logo: J.text(J.at(f, 'teams.t1.logo')),
-      team2Logo: J.text(J.at(f, 'teams.t2.logo')),
-      venue: J.str(f['ground']).trim(),
-      date: date,
-      kind: disp.kind,
-      statusLine: disp.statusLine,
-      chipLabel: chipLabel,
-      chipVariant: chipVariant,
-      finishedMessage: finished,
-      seriesLine: seriesLine,
-      format: normalizeFixtureFormat(f),
-      name: rawName.isEmpty ? null : rawName,
-    );
-  }
-}
-
-/// RN FixturesView: `Array.isArray(data) ? data : data?.data ?? []`.
-List<SeriesFixture> parseSeriesFixtures(dynamic data, {String? seriesTitle, DateTime? now}) {
-  final raw = data is List ? data : J.map(data)['data'];
-  final maps = J.maps(raw);
-  return [
-    for (var i = 0; i < maps.length; i++) SeriesFixture.fromJson(maps[i], index: i, seriesTitle: seriesTitle, now: now),
+  List<MatchSummary> get live => [
+    for (final m in matches)
+      if (m.isInProgress) m,
   ];
+
+  /// Soonest first.
+  List<MatchSummary> get upcoming {
+    final l = [
+      for (final m in matches)
+        if (!m.isInProgress && !m.isFinished && m.resultMessage == null) m,
+    ];
+    l.sort(_byStart);
+    return l;
+  }
+
+  /// Most recent first.
+  List<MatchSummary> get results {
+    final l = [
+      for (final m in matches)
+        if (!m.isInProgress && (m.isFinished || m.resultMessage != null)) m,
+    ];
+    l.sort((a, b) => _byStart(b, a));
+    return l;
+  }
+
+  /// Distinct provider formats, in order of appearance ("T20", "Test").
+  List<String> get formats {
+    final out = <String>[];
+    for (final m in matches) {
+      final f = formatLabel(m.format?.toUpperCase());
+      if (f != null && !out.contains(f)) out.add(f);
+    }
+    return out;
+  }
+
+  /// "7 Nov – 20 Nov 2026" across the fixtures' start dates, '' if unknown.
+  String get dateSpan {
+    final dates = [for (final m in matches) ?m.startTime]..sort();
+    if (dates.isEmpty) return '';
+    return formatDateSpan(dates.first, dates.last);
+  }
+
+  static int _byStart(MatchSummary a, MatchSummary b) {
+    final x = a.startTime, y = b.startTime;
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return x.compareTo(y);
+  }
 }
 
-/// RN `StartsInBig` label: "2d 3h" / "4h 5m" / "12m"; null when the match is in the past.
-String? startsInLabel(DateTime target, DateTime now) {
-  final diff = target.difference(now);
-  if (diff.inMilliseconds <= 0) return null;
-  final days = diff.inDays;
-  final hours = diff.inHours % 24;
-  final minutes = diff.inMinutes % 60;
-  if (days > 0) return '${days}d ${hours}h';
-  if (hours > 0) return '${hours}h ${minutes}m';
-  return '${minutes}m';
+/// `Array.isArray(data) ? data : data?.data ?? []`.
+SeriesFixturesData parseSeriesFixtures(dynamic data) {
+  final raw = data is List ? data : J.map(data)['data'];
+  return SeriesFixturesData(parseMatchList(raw));
 }
 
 // ───────────────────────── Points table ─────────────────────────
 
-String _fmtNum(dynamic v) {
-  final n = J.number(v) ?? 0;
+String _count(dynamic v) {
+  final n = J.number(v);
+  if (n == null) return kNotAvailable;
   return n == n.roundToDouble() ? n.toInt().toString() : n.toString();
+}
+
+/// Signed, three decimals: "+0.422", "-0.605", "0.000"; "–" when missing.
+String formatNrr(dynamic v) {
+  final n = J.number(v);
+  if (n == null || !n.isFinite) return kNotAvailable;
+  final s = n.abs().toStringAsFixed(3);
+  if (s == '0.000') return s;
+  return n > 0 ? '+$s' : '-$s';
+}
+
+/// One provider result for a team (form guide / expanded row).
+class TeamResult {
+  const TeamResult({required this.opponent, required this.outcome, this.margin, this.title, this.date});
+  final String opponent;
+
+  /// 'W', 'L', or null when the match has no result yet.
+  final String? outcome;
+  final String? margin;
+  final String? title;
+  final DateTime? date;
 }
 
 class PointsRow {
   const PointsRow({
+    required this.position,
+    required this.key,
     required this.shortName,
     this.logo,
     required this.matches,
@@ -278,23 +222,71 @@ class PointsRow {
     required this.noResult,
     required this.points,
     required this.nrr,
+    this.marker,
+    this.form = const [],
+    this.results = const [],
   });
+
+  /// Row order as the provider sends it (not computed).
+  final int position;
+  final String key;
   final String shortName;
   final String? logo;
   final String matches, won, lost, tied, noResult, points, nrr;
 
-  static PointsRow fromJson(JsonMap t) {
-    final nrr = J.number(t['netRunRate']);
+  /// 'Q' / 'E' only when the provider sets `qualify` / `eliminate`.
+  final String? marker;
+
+  /// Last five results, oldest first ('W' / 'L').
+  final List<String> form;
+  final List<TeamResult> results;
+
+  static PointsRow fromJson(JsonMap t, int position) {
+    final key = J.str(t['key']).trim();
+    final results = <TeamResult>[];
+    for (final tm in J.maps(t['teamMatches'])) {
+      final wT = J.text(J.at(tm, 'result.wT'))?.trim();
+      final String? outcome = wT == null || wT.isEmpty
+          ? null
+          : key.isNotEmpty && wT.toLowerCase() == key.toLowerCase()
+          ? 'W'
+          : 'L';
+      final ts = J.number(tm['timestamp']);
+      results.add(
+        TeamResult(
+          opponent: J.text(J.at(tm, 'opponent.shortName')) ?? J.text(J.at(tm, 'opponent.name')) ?? kNotAvailable,
+          outcome: outcome,
+          margin: J.text(J.at(tm, 'result.sM')),
+          title: J.text(tm['name']),
+          date: ts == null ? null : DateTime.fromMillisecondsSinceEpoch((ts > 1e12 ? ts : ts * 1000).round(), isUtc: true).toLocal(),
+        ),
+      );
+    }
+    final decided = [
+      for (final r in results)
+        if (r.outcome != null) r.outcome!,
+    ];
+    bool flag(dynamic v) {
+      if (v == null || v == false || v == 0) return false;
+      if (v is String && v.trim().isEmpty) return false;
+      return true;
+    }
+
     return PointsRow(
-      shortName: J.str(t['shortName']),
+      position: position,
+      key: key,
+      shortName: J.text(t['shortName']) ?? J.text(t['name']) ?? kNotAvailable,
       logo: J.text(t['logo']),
-      matches: _fmtNum(t['matches']),
-      won: _fmtNum(t['won']),
-      lost: _fmtNum(t['lost']),
-      tied: _fmtNum(t['tied']),
-      noResult: _fmtNum(t['noResult']),
-      points: _fmtNum(t['points']),
-      nrr: nrr == null ? '0.00' : nrr.toStringAsFixed(2),
+      matches: _count(t['matches']),
+      won: _count(t['won']),
+      lost: _count(t['lost']),
+      tied: _count(t['tied']),
+      noResult: _count(t['noResult']),
+      points: _count(t['points']),
+      nrr: formatNrr(t['netRunRate']),
+      marker: flag(t['qualify']) ? 'Q' : (flag(t['eliminate']) ? 'E' : null),
+      form: decided.length > 5 ? decided.sublist(decided.length - 5) : decided,
+      results: results,
     );
   }
 }
@@ -305,46 +297,74 @@ class PointsGroup {
   final List<PointsRow> rows;
 }
 
-/// RN PointsTableView: `data.series.pointsTable`.
-List<PointsGroup> parsePointsTable(dynamic data) => [
-      for (final g in J.maps(J.at(data, 'series.pointsTable')))
-        PointsGroup(J.str(g['name']), [for (final t in J.maps(g['teams'])) PointsRow.fromJson(t)]),
-    ];
+/// `data.series.pointsTable`; malformed rows are skipped.
+List<PointsGroup> parsePointsTable(dynamic data) {
+  final out = <PointsGroup>[];
+  for (final g in J.maps(J.at(data, 'series.pointsTable'))) {
+    final teams = J.maps(g['teams']);
+    if (teams.isEmpty) continue;
+    out.add(PointsGroup(J.str(g['name']).trim(), [for (var i = 0; i < teams.length; i++) PointsRow.fromJson(teams[i], i + 1)]));
+  }
+  return out;
+}
 
 // ───────────────────────── Stats ─────────────────────────
 
 const Map<String, String> kStatLabels = {
-  'most_runs': 'Most Runs',
-  'highest_score': 'Highest Score',
-  'best_batting_average': 'Best Batting Avg',
-  'best_batting_strike': 'Best Strike Rate',
-  'most_wickets': 'Most Wickets',
-  'most_fours': 'Most Fours',
-  'most_sixes': 'Most Sixes',
-  'best_bowling_average': 'Best Bowling Avg',
+  'most_runs': 'Most runs',
+  'most_wickets': 'Most wickets',
+  'highest_score': 'Highest score',
+  'best_batting_average': 'Best batting average',
+  'best_batting_strike': 'Best strike rate',
+  'best_bowling_average': 'Best bowling average',
+  'most_sixes': 'Most sixes',
+  'most_fours': 'Most fours',
+  'most_fifties': 'Most fifties',
+};
+
+/// Unit word shown after a leader's value.
+const Map<String, String> kStatUnits = {
+  'most_runs': 'runs',
+  'most_wickets': 'wkts',
+  'highest_score': 'runs',
+  'best_batting_average': 'avg',
+  'best_batting_strike': 'SR',
+  'best_bowling_average': 'avg',
+  'most_sixes': 'sixes',
+  'most_fours': 'fours',
+  'most_fifties': '50s',
 };
 
 const List<String> kStatOrder = [
   'most_runs',
+  'most_wickets',
   'highest_score',
   'best_batting_average',
   'best_batting_strike',
-  'most_wickets',
-  'most_fours',
-  'most_sixes',
   'best_bowling_average',
+  'most_sixes',
+  'most_fours',
+  'most_fifties',
 ];
 
-bool isDecimalStat(String key) =>
-    key == 'best_batting_average' || key == 'best_batting_strike' || key == 'best_bowling_average';
+bool isDecimalStat(String key) => key == 'best_batting_average' || key == 'best_batting_strike' || key == 'best_bowling_average';
 
 class StatEntry {
-  const StatEntry({required this.rank, required this.playerKey, required this.name, required this.team, this.logo, required this.value});
+  const StatEntry({
+    required this.rank,
+    required this.playerKey,
+    required this.name,
+    required this.team,
+    this.logo,
+    required this.value,
+    this.innings,
+  });
   final int rank;
   final String? playerKey;
   final String name, team;
   final String? logo;
   final String value;
+  final int? innings;
 
   JsonMap toPlayerJson() => {'key': playerKey, 'name': name, 'logo': logo, 'team': team};
 }
@@ -352,7 +372,8 @@ class StatEntry {
 class StatCategory {
   const StatCategory(this.key, this.title, this.entries);
   final String key, title;
-  final List<StatEntry> entries; // top 10
+  final List<StatEntry> entries; // top 10, provider order
+  String get unit => kStatUnits[key] ?? '';
 }
 
 class StatsFormat {
@@ -365,15 +386,15 @@ class SeriesStatsData {
   const SeriesStatsData({this.comingSoon = false, this.formats = const [], this.hasData = true});
   final bool comingSoon;
 
-  /// false when the API returned no `data` at all (RN "No stats available").
+  /// false when the API returned no `data` at all.
   final bool hasData;
   final List<StatsFormat> formats;
 }
 
-String _statValue(dynamic v, int decimals) {
+String? _statValue(dynamic v, int decimals) {
   final n = J.number(v);
-  if (decimals > 0) return (n ?? 0).toStringAsFixed(decimals);
-  if (n == null) return J.text(v) ?? '0';
+  if (n == null || !n.isFinite) return null;
+  if (decimals > 0) return n.toStringAsFixed(decimals);
   return n == n.roundToDouble() ? n.toInt().toString() : n.toString();
 }
 
@@ -386,64 +407,67 @@ SeriesStatsData parseSeriesStats(dynamic data) {
     final fm = J.map(entry.value);
     final cats = <StatCategory>[];
     for (final statKey in kStatOrder) {
-      final list = J.maps(fm[statKey]);
-      if (list.isEmpty) continue;
       final decimals = isDecimalStat(statKey) ? 2 : 0;
-      final top = list.take(10).toList();
-      cats.add(StatCategory(statKey, kStatLabels[statKey] ?? statKey, [
-        for (var i = 0; i < top.length; i++)
+      final entries = <StatEntry>[];
+      for (final row in J.maps(fm[statKey])) {
+        if (entries.length == 10) break;
+        final value = _statValue(row['value'], decimals);
+        final name = J.text(row['playerName']);
+        if (value == null || name == null) continue; // never a fake 0 or nameless row
+        entries.add(
           StatEntry(
-            rank: i + 1,
-            playerKey: J.text(top[i]['playerKey']),
-            name: J.text(top[i]['playerName']) ?? 'Unknown Player',
-            team: J.str(top[i]['team']),
-            logo: J.text(top[i]['logo']),
-            value: _statValue(top[i]['value'], decimals),
+            rank: entries.length + 1,
+            playerKey: J.text(row['playerKey']),
+            name: name,
+            team: J.str(row['team']).trim(),
+            logo: J.text(row['logo']),
+            value: value,
+            innings: J.integer(row['innings']),
           ),
-      ]));
+        );
+      }
+      if (entries.isNotEmpty) cats.add(StatCategory(statKey, kStatLabels[statKey] ?? statKey, entries));
     }
-    formats.add(StatsFormat(entry.key, cats));
+    if (cats.isNotEmpty) formats.add(StatsFormat(formatLabel(entry.key) ?? entry.key, cats));
   }
   return SeriesStatsData(formats: formats);
 }
 
 // ───────────────────────── Squads ─────────────────────────
 
-/// RN `getRoleName`.
-String roleName(int role) => switch (role) {
-      0 => 'Batsman',
-      1 => 'Bowler',
-      2 => 'All Rounder',
-      3 => 'Wicket Keeper',
-      4 => 'Batsman/WK',
-      _ => 'Player',
-    };
+/// Provider role code → label (codes confirmed by the fixture: 1 = bowler).
+String roleName(int? role) => switch (role) {
+  0 => 'Batter',
+  1 => 'Bowler',
+  2 => 'All-rounder',
+  3 => 'Wicketkeeper',
+  4 => 'Wicketkeeper batter',
+  _ => '',
+};
 
 class SquadPlayer {
-  const SquadPlayer({required this.key, required this.name, this.logo, required this.role, required this.tag, required this.isPlaying});
+  const SquadPlayer({required this.key, required this.name, this.logo, required this.role, required this.tags, required this.isPlaying});
   final String? key;
   final String name;
   final String? logo;
+
+  /// '' when the provider role is unknown (the slot is hidden).
   final String role;
-  final String tag;
+
+  /// 'C' (captain), 'WK' (wicketkeeper), 'XI' (in the playing XI).
+  final List<String> tags;
   final bool isPlaying;
 
   JsonMap toPlayerJson() => {'key': key, 'name': name, 'logo': logo};
 
   static SquadPlayer fromJson(JsonMap p) {
     final isPlaying = J.boolean(p['isPlaying']);
-    final tags = <String>[
-      if (isPlaying) 'XI',
-      if (J.boolean(p['isCaptain'])) 'C',
-      if (J.boolean(p['isWicketKeeper'])) 'WK',
-    ];
-    final rawRole = p['role'];
     return SquadPlayer(
       key: J.text(p['key']),
-      name: J.str(p['name']),
+      name: J.str(p['name']).trim(),
       logo: J.text(p['logo']),
-      role: roleName(rawRole == null ? 0 : (J.integer(rawRole) ?? -1)),
-      tag: tags.isEmpty ? '-' : tags.join(', '),
+      role: roleName(J.integer(p['role'])),
+      tags: [if (J.boolean(p['isCaptain'])) 'C', if (J.boolean(p['isWicketKeeper'])) 'WK', if (isPlaying) 'XI'],
       isPlaying: isPlaying,
     );
   }
@@ -456,7 +480,7 @@ class SquadTeam {
   final List<SquadPlayer> players;
 }
 
-/// RN SquadsView: `data.squads`.
+/// `data.squads`; players without a name are skipped.
 List<SquadTeam> parseSquads(dynamic data) {
   final squads = J.maps(J.map(data)['squads']);
   return [
@@ -468,7 +492,10 @@ List<SquadTeam> parseSquads(dynamic data) {
           key: '${J.text(s['teamId']) ?? J.text(s['teamKey']) ?? J.text(s['_id']) ?? name}-$i',
           name: name,
           logo: J.text(s['teamLogo']),
-          players: [for (final p in J.maps(s['players'])) SquadPlayer.fromJson(p)],
+          players: [
+            for (final p in J.maps(s['players']))
+              if (J.str(p['name']).trim().isNotEmpty) SquadPlayer.fromJson(p),
+          ],
         );
       }(),
   ];

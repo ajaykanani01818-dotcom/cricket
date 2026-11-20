@@ -75,7 +75,8 @@ class AutoRefresh with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       onTick();
       _schedule();
-    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
       _timer?.cancel();
     }
   }

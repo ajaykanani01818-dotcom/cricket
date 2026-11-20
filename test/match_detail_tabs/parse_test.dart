@@ -155,9 +155,9 @@ void main() {
     test('role labels', () {
       expect(playingXIRoleLabel(0), 'Batter');
       expect(playingXIRoleLabel(1), 'Bowler');
-      expect(playingXIRoleLabel(2), 'WK');
-      expect(playingXIRoleLabel(3), 'Batting All Rounder');
-      expect(playingXIRoleLabel(4), 'Bowling All Rounder');
+      expect(playingXIRoleLabel(2), 'Wicketkeeper');
+      expect(playingXIRoleLabel(3), 'Batting all-rounder');
+      expect(playingXIRoleLabel(4), 'Bowling all-rounder');
       expect(playingXIRoleLabel(9), 'Player');
       expect(playingXIRoleLabel(null), 'Player');
       expect(playingXIRoleLabel('NaN'), 'Player');
@@ -191,37 +191,64 @@ void main() {
     });
   });
 
+  group('parseSquad', () {
+    test('bench and wicketkeepers from the real fixture', () {
+      final v = parseSquad(fixture('match_squad')['data']);
+      expect(v.bench1, hasLength(4));
+      expect(v.bench2, hasLength(4));
+      expect(v.keepers, isNotEmpty);
+      expect(parseSquad(null).bench1, isEmpty);
+      expect(parseSquad({'match': 'x'}).keepers, isEmpty);
+    });
+  });
+
   group('parseStats', () {
-    test('parses the real fixtures (first innings of each team)', () {
+    test('every innings from the real fixtures, in batting order', () {
       final v = parseStats(
         analytics: fixture('match_analytics')['data'],
         scoringRate: fixture('match_scoring_rate')['data'],
         boundaries: fixture('match_boundaries')['data'],
+        order: ['t2_1', 't1_1'],
       );
-      expect(v.scoringRate1, '4.63');
-      expect(v.scoringRate2, '3.95');
-      expect(v.boundaries1.fours, 36);
-      expect(v.boundaries1.sixes, 1);
-      expect(v.boundaries1.total, 37);
-      expect(v.boundaries2.total, 52);
-      expect(v.dotBall1, '61.2%');
-      expect(v.dotBall2, '66.5%');
+      expect(v.innings.map((i) => i.key), ['t2_1', 't1_1']);
+      final ban = v.innings.first, rsa = v.innings.last;
+      expect(ban.label, 'BAN 1st innings');
+      expect(ban.runRate, 3.95);
+      expect(ban.boundaries, 52);
+      expect(ban.dotPercent, 66.45);
+      expect(ban.overRuns, hasLength(102));
+      expect(rsa.shortLabel, 'RSA 1st');
+      expect(rsa.fours, 36);
+      expect(rsa.sixes, 1);
+      expect(rsa.dotBalls, 232);
+      expect(rsa.totalBalls, 379);
+      expect(rsa.overRuns, hasLength(62));
+      expect(rsa.overRuns.take(3), [0, 5, 4], reason: 'overNumber 0 is the first over');
+      expect(rsa.bowling.first.name, 'Taskin Ahmed');
+      expect(rsa.bowling.first.economy, 3);
     });
 
-    test('all null / malformed → zeros', () {
-      final v = parseStats();
-      expect(v.scoringRate1, '0.00');
-      expect(v.boundaries2.fours, 0);
-      expect(v.dotBall2, '0.0%');
+    test('missing / malformed values stay null (never 0)', () {
+      expect(parseStats().isEmpty, isTrue);
       final w = parseStats(
         scoringRate: {'teams': {'team1': {'innings': {'t1_1': {'scoringRate': 'Infinity'}}}}},
         boundaries: {'teams': {'team1': {'innings': {'t1_1': {'fours': 'NaN', 'sixes': '3'}}}}},
         analytics: {'teams': {'team1': {'innings': 'x'}}},
       );
-      expect(w.scoringRate1, '0.00');
-      expect(w.boundaries1.fours, 0);
-      expect(w.boundaries1.sixes, 3);
-      expect(w.dotBall1, '0.0%');
+      final i = w.innings.single;
+      expect(i.runRate, isNull);
+      expect(i.fours, isNull);
+      expect(i.sixes, 3);
+      expect(i.dotPercent, isNull);
+      expect(i.overRuns, isEmpty);
+      expect(i.teamCode, 'Team 1');
+    });
+
+    test('wicket over from a fall-of-wickets over string', () {
+      expect(wicketOverFromFow('1.3'), 2);
+      expect(wicketOverFromFow('58.6'), 59);
+      expect(wicketOverFromFow('43'), 43);
+      expect(wicketOverFromFow('-'), isNull);
     });
   });
 }

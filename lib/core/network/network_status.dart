@@ -16,10 +16,14 @@ class NetworkStatus extends ValueNotifier<bool> {
     try {
       value = _online(await c.checkConnectivity());
     } catch (_) {}
-    _sub ??= c.onConnectivityChanged.listen((r) => value = _online(r), onError: (_) {});
+    _sub ??= c.onConnectivityChanged.listen(
+      (r) => value = _online(r),
+      onError: (_) {},
+    );
   }
 
-  static bool _online(List<ConnectivityResult> r) => r.any((e) => e != ConnectivityResult.none);
+  static bool _online(List<ConnectivityResult> r) =>
+      r.any((e) => e != ConnectivityResult.none);
 
   @visibleForTesting
   void debugSet(bool online) => value = online;

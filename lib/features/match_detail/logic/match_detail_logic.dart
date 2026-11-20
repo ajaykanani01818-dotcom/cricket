@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/json.dart';
 import 'commentary_html.dart';
+import 'match_state.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Date / score formatting
@@ -284,26 +285,46 @@ BallTone ballTone(String? value) {
 
 class TeamVM {
   final String name;
+  final String? shortName;
+  final String? key;
   final String? logo;
   final String? score;
-  const TeamVM({required this.name, this.logo, this.score});
+
+  /// False when the provider sent no team name ("TBD" is shown).
+  final bool known;
+  const TeamVM({required this.name, this.shortName, this.key, this.logo, this.score, this.known = true});
 
   factory TeamVM.fromJson(dynamic v) {
     final m = J.map(v);
-    return TeamVM(name: J.text(m['name']) ?? 'TBD', logo: J.text(m['logo']), score: J.text(m['score']));
+    final name = J.text(m['name']);
+    return TeamVM(
+      name: name ?? 'TBD',
+      shortName: J.text(m['short_name']) ?? J.text(m['shortName']),
+      key: J.text(m['key']),
+      logo: J.text(m['logo']),
+      score: J.text(m['score']),
+      known: name != null,
+    );
   }
+
+  /// Short code (data, kept uppercase) or the name.
+  String get code => shortName ?? name;
 }
 
+/// Weather as supplied; every field is optional (hidden when absent).
 class WeatherVM {
-  final String condition, temperature, wind, humidity, rainForecast;
+  final String? condition, temperature, wind, humidity, rainForecast;
   const WeatherVM(this.condition, this.temperature, this.wind, this.humidity, this.rainForecast);
 
   static WeatherVM? fromJson(dynamic v) {
     if (v is! Map) return null;
     final m = J.map(v);
-    return WeatherVM(J.str(m['condition'], '-'), J.str(m['temperature'], '-'), J.str(m['wind'], '-'),
-        J.str(m['humidity'], '-'), J.str(m['rainForecast'], '-'));
+    final w = WeatherVM(J.text(m['condition']), J.text(m['temperature']), J.text(m['wind']), J.text(m['humidity']),
+        J.text(m['rainForecast']));
+    return w.isEmpty ? null : w;
   }
+
+  bool get isEmpty => condition == null && temperature == null && wind == null && humidity == null && rainForecast == null;
 }
 
 /// One ball shown as a chip in the Current Over card.
@@ -354,18 +375,14 @@ class CurrentOverVM {
   }
 }
 
-/// RN `isLive` memo for the detail screen.
-bool deriveDetailIsLive(JsonMap m) {
-  if (J.text(J.at(m, 'result.message')) != null) return false;
-  final raw = J.str(m['status']);
-  final status = raw.toUpperCase();
-  const finished = ['COMPLETED', 'FINISHED', 'ENDED', 'ABANDONED', 'CANCELLED'];
-  if (finished.any(status.contains)) return false;
-  if (m['isLive'] != null) return J.boolean(m['isLive']);
-  return raw == 'LIVE' || status.contains('LIVE');
-}
+/// Play in progress (live or a break such as stumps), from `status` only:
+/// the API's `isLive` flag is true on upcoming and completed items too
+/// (research §0.3 quirk 1), so it is ignored.
+bool deriveDetailIsLive(JsonMap m) =>
+    resolveMatchStatus(J.str(m['status']), resultMessage: J.text(J.at(m, 'result.message'))).inPlay;
 
-bool deriveIsMatchWon(JsonMap m) => J.text(J.at(m, 'result.message')) != null;
+bool deriveIsMatchWon(JsonMap m) =>
+    resolveMatchStatus(J.str(m['status']), resultMessage: J.text(J.at(m, 'result.message'))).phase == MatchPhase.completed;
 
 bool isCompletedForMom(String status) {
   final s = status.toUpperCase();
@@ -392,6 +409,13 @@ class MatchDetailVM {
   final String? dateTimeLabel;
   final String fingerprint;
 
+  /// Resolved from `status` (+ result message).
+  final MatchStatus matchStatus;
+  final String? format, name, ground, winnerKey;
+
+  /// Scheduled start (device local), null when unknown.
+  final DateTime? startTime;
+
   const MatchDetailVM({
     required this.raw,
     required this.id,
@@ -413,12 +437,29 @@ class MatchDetailVM {
     required this.currentOverCommentaryBalls,
     this.dateTimeLabel,
     required this.fingerprint,
+    required this.matchStatus,
+    this.format,
+    this.name,
+    this.ground,
+    this.winnerKey,
+    this.startTime,
   });
 
   factory MatchDetailVM.fromJson(JsonMap m) {
     final status = J.str(m['status']);
     final momKey = J.text(J.at(m, 'result.menOfTheMatchKey')) ?? '';
+    final ms = resolveMatchStatus(status, resultMessage: J.text(J.at(m, 'result.message')));
+    final sec = parseMatchStartTimestampSeconds(m['timestamp']);
+    final start = sec != null
+        ? DateTime.fromMillisecondsSinceEpoch(sec * 1000)
+        : DateTime.tryParse(J.str(m['startDate']).trim())?.toLocal();
     return MatchDetailVM(
+      matchStatus: ms,
+      format: J.text(m['format']),
+      name: J.text(m['name']),
+      ground: J.text(m['ground']),
+      winnerKey: J.text(J.at(m, 'result.winnerTeamKey')),
+      startTime: start,
       raw: m,
       id: J.str(m['_id']),
       seriesName: J.str(m['seriesName']),
@@ -429,8 +470,8 @@ class MatchDetailVM {
       t2: TeamVM.fromJson(J.at(m, 'teams.t2')),
       status: status,
       resultMessage: J.text(J.at(m, 'result.message')),
-      isLive: deriveDetailIsLive(m),
-      isMatchWon: deriveIsMatchWon(m),
+      isLive: ms.inPlay,
+      isMatchWon: ms.phase == MatchPhase.completed,
       momKey: momKey,
       momEligible: isCompletedForMom(status) && momKey.isNotEmpty,
       weather: WeatherVM.fromJson(m['weather']),
@@ -601,7 +642,11 @@ class CommentaryBall {
   final bool hasCommentary;
   final List<CommentaryTextRun> textRuns; // parsed once
 
+  /// Present on the last ball of an over (over-end card).
+  final OverEndSummary? overEnd;
+
   const CommentaryBall({
+    this.overEnd,
     required this.key,
     required this.value,
     this.overNumber,
@@ -630,15 +675,71 @@ class CommentaryBall {
       type: type,
       hasCommentary: html.trim().isNotEmpty,
       textRuns: parseCommentaryRuns(html),
+      overEnd: type == 'ball' ? OverEndSummary.fromJson(b['overSummary']) : null,
     );
   }
 
   bool get isBallWithCommentary => type == 'ball' && hasCommentary;
+  bool get isInfo => type == 'info' && hasCommentary;
 
   /// RN: WD/NB → 1; W/WK → 0; else parseInt(value) || 0.
   int get runs => commentaryBallRuns(value);
 
   String get overLabel => '${overNumber ?? ''}.$ballNumber';
+}
+
+/// `overSummary` of an over's last ball. Wickets-in-over is NOT read
+/// (the field looked cumulative in the data, research §0.3 quirk 8).
+class OverEndSummary {
+  const OverEndSummary({
+    required this.overNumber,
+    this.runs,
+    this.totalScore,
+    this.battingTeam,
+    this.bowlerLine,
+    this.batterLines = const [],
+  });
+  final int overNumber;
+  final int? runs;
+  final int? totalScore;
+  final String? battingTeam;
+
+  /// "Taskin Ahmed 15-4-45-0".
+  final String? bowlerLine;
+
+  /// ["Temba Bavuma 19 (54)", …].
+  final List<String> batterLines;
+
+  static OverEndSummary? fromJson(dynamic v) {
+    if (v is! Map) return null;
+    final m = J.map(v);
+    final over = J.integer(m['overNumber']);
+    if (over == null || over <= 0) return null;
+    String? bowler;
+    final bs = J.map(m['bowlerStats']);
+    final bn = J.text(bs['name']);
+    if (bn != null) {
+      final parts = [J.text(bs['oversBowled']), J.text(bs['maidenOvers']), J.text(bs['runsConceded']), J.text(bs['wickets'])];
+      bowler = parts.every((p) => p != null) ? '$bn ${parts.join('-')}' : bn;
+    }
+    final batters = <String>[];
+    for (final k in ['batsman1', 'batsman2']) {
+      final b = J.map(J.at(m, 'batsmenStats.$k'));
+      final n = J.text(b['name']);
+      if (n == null) continue;
+      final r = J.text(b['runs']);
+      final bf = J.text(b['ballsFaced']);
+      batters.add(r == null ? n : bf == null ? '$n $r' : '$n $r ($bf)');
+    }
+    return OverEndSummary(
+      overNumber: over,
+      runs: J.integer(m['runsInOver']),
+      totalScore: J.integer(m['totalScore']),
+      battingTeam: J.text(m['battingTeamKey']),
+      bowlerLine: bowler,
+      batterLines: batters,
+    );
+  }
 }
 
 int commentaryBallRuns(String value) {
@@ -741,13 +842,13 @@ List<CommentaryBall> liveTabCommentary(LiveVM? live, MatchDetailVM match) {
 
 const commentaryPageSize = 60;
 
-enum CommentaryFilter { all, six, four, wicket }
+/// Key moments filter (client-side on the ball value).
+enum CommentaryFilter { all, wickets, boundaries }
 
 String commentaryFilterLabel(CommentaryFilter f) => switch (f) {
       CommentaryFilter.all => 'All',
-      CommentaryFilter.six => '6s',
-      CommentaryFilter.four => '4s',
-      CommentaryFilter.wicket => 'Wickets',
+      CommentaryFilter.wickets => 'Wickets',
+      CommentaryFilter.boundaries => 'Boundaries',
     };
 
 class CommentaryPage {
@@ -809,12 +910,10 @@ List<CommentaryBall> filterCommentary(List<CommentaryBall> balls, {String team =
   Iterable<CommentaryBall> it = balls;
   if (team != 'all') it = it.where((b) => b.inningsIndex == team);
   switch (filter) {
-    case CommentaryFilter.six:
-      it = it.where((b) => b.value == '6');
-    case CommentaryFilter.four:
-      it = it.where((b) => b.value == '4');
-    case CommentaryFilter.wicket:
-      it = it.where((b) => b.value == 'W' || b.value == 'WK');
+    case CommentaryFilter.boundaries:
+      it = it.where((b) => b.value == '4' || b.value == '6');
+    case CommentaryFilter.wickets:
+      it = it.where((b) => isWicketChip(b.value));
     case CommentaryFilter.all:
       break;
   }

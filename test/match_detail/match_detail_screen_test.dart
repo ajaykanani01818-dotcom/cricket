@@ -1,6 +1,9 @@
 import 'dart:async';
 
 import 'package:crickbex/core/api/json.dart';
+import 'package:crickbex/core/theme/app_theme.dart';
+import 'package:crickbex/core/widgets/score_text.dart';
+import 'package:crickbex/core/widgets/seam_strip.dart';
 import 'package:crickbex/features/ads/ads_backend.dart';
 import 'package:crickbex/features/ads/ads_manager.dart';
 import 'package:crickbex/features/match_detail/logic/match_detail_logic.dart';
@@ -18,7 +21,7 @@ import 'helpers.dart';
 
 const id = '3QJ-e3k';
 
-Future<GoRouter> pumpScreen(WidgetTester tester, FakeApi api, {String matchId = id}) async {
+Future<GoRouter> pumpScreen(WidgetTester tester, FakeApi api, {String matchId = id, ThemeMode mode = ThemeMode.light}) async {
   final router = GoRouter(
     initialLocation: '/live/match/$matchId',
     routes: [
@@ -41,23 +44,33 @@ Future<GoRouter> pumpScreen(WidgetTester tester, FakeApi api, {String matchId = 
     ],
   );
   addTearDown(router.dispose);
-  await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+  await tester.pumpWidget(MaterialApp.router(
+    theme: buildAppTheme(),
+    darkTheme: buildAppTheme(brightness: Brightness.dark),
+    themeMode: mode,
+    routerConfig: router,
+  ));
   return router;
 }
 
-Future<void> settle(WidgetTester tester, [int frames = 6]) async {
+Future<void> settle(WidgetTester tester, [int frames = 8]) async {
   for (var i = 0; i < frames; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
 }
 
-String textOf(WidgetTester tester, String key) => stripJoiners(tester.widget<Text>(find.byKey(ValueKey(key))).data ?? '');
+String textOf(WidgetTester tester, String key) {
+  final w = tester.widget(find.byKey(ValueKey(key)));
+  if (w is ScoreText) return stripJoiners(w.text);
+  return stripJoiners((w as Text).data ?? '');
+}
 
 Future<void> tapKey(WidgetTester tester, String key) async {
   final f = find.byKey(ValueKey(key));
-  // Tabs live in the pinned header (always visible); ensureVisible on a pinned
-  // header would scroll the page instead.
-  if (!key.startsWith('match_detail_tab_')) {
+  // Header / tab bar controls live in the pinned header: ensureVisible
+  // would scroll the page instead.
+  const pinned = ['match_detail_tab_', 'match_detail_over_'];
+  if (!pinned.any(key.startsWith)) {
     await tester.ensureVisible(f);
     await tester.pump();
   }
@@ -68,123 +81,296 @@ Future<void> tapKey(WidgetTester tester, String key) async {
 Finder get mainScrollable =>
     find.descendant(of: find.byKey(const ValueKey('match_detail_scroll')), matching: find.byType(Scrollable)).first;
 
+JsonMap liveStatusDetail() => liveDetailData()..['status'] = 'LIVE';
+
+/// The live fixture plus [extra] deliveries (newest first) in the next over.
+JsonMap liveWithNewBalls(List<String> values, {int wickets = 4, String? wicketName}) {
+  final l = deepCopy(J.map(fixture('match_live')['data']));
+  final balls = J.list(l['balls']);
+  for (var i = 0; i < values.length; i++) {
+    balls.insert(0, {
+      'type': 'ball',
+      'overNumber': 62,
+      'ballNumber': i + 1,
+      'value': values[i],
+      'inningsIndex': 't1_1',
+      'commentaryTimestamp': 1794843300000 + i * 1000,
+      'commentary': '<p>New ball ${i + 1}</p>',
+    });
+  }
+  final score = J.map(l['score']);
+  J.map(J.at(score, 'teams.team1'))['inningsStats'] = {'runs': 287 + values.where((v) => v != 'WK').length, 'wickets': wickets, 'overs': '62.${values.length}'};
+  if (wicketName != null) {
+    score['lastWicket'] = {'name': wicketName, 'run': '19', 'ball': '55', 'info': 'b Taskin Ahmed', 'score': '287/5', 'over': '62.1'};
+  }
+  return l;
+}
+
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  group('completed match', () {
-    testWidgets('shimmer → header, result, Player of the Match, scorecard-backed Live tab; no polling', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
+  group('header states', () {
+    testWidgets('Test at stumps: frozen score, trail line, status note, Seam strip; no live pulse', (tester) async {
+      final api = FakeApi();
       await pumpScreen(tester, api);
       expect(find.byKey(const ValueKey('match_detail_shimmer')), findsOneWidget);
       await settle(tester);
 
       expect(find.byKey(const ValueKey('match_detail_shimmer')), findsNothing);
-      expect(find.text('South Africa'), findsWidgets);
-      expect(find.text('Bangladesh'), findsWidgets);
-      expect(find.text('Bangladesh tour of South Africa 2026'), findsOneWidget);
-      expect(find.text('TEST · The Wanderers Stadium, Johannesburg, South Africa'), findsOneWidget);
-      expect(find.text('Bangladesh opt to bat'), findsOneWidget);
-      expect(textOf(tester, 'match_detail_score_team1'), '386/7 (90.0)');
-      expect(textOf(tester, 'match_detail_score_team2'), '400/10 (101.2)');
-      expect(find.text('South Africa won by 5 wickets'), findsOneWidget);
       expect(find.byKey(const ValueKey('match_detail_live_badge')), findsNothing);
-      expect(find.byKey(const ValueKey('match_detail_role_team1')), findsNothing);
-      expect(find.byKey(const ValueKey('match_detail_current_over')), findsNothing);
-      expect(textOf(tester, 'match_detail_mom_name'), 'Aiden Markram');
+      expect(find.descendant(of: find.byKey(const ValueKey('match_detail_status_badge')), matching: find.text('Stumps')), findsOneWidget);
+      expect(textOf(tester, 'match_detail_score_team1'), '287/4'); // live inningsStats win over the stale API score
+      expect(textOf(tester, 'match_detail_score_team2'), '400');
+      expect(textOf(tester, 'match_detail_situation'), 'South Africa trail by 113');
+      expect(find.text('CRR 4.63'), findsOneWidget);
+      expect(find.textContaining('Stumps on Day 2'), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_over_strip')), findsOneWidget);
+      expect(find.text('Over 62'), findsOneWidget);
+      expect(find.text('Bangladesh tour of South Africa 2026'), findsOneWidget);
+      expect(find.textContaining('balls left'), findsNothing, reason: 'no limited-overs fields on a Test');
+      expect(api.count('scorecard'), 1, reason: 'header needs the innings list');
+    });
 
-      // Live tab of a finished match uses the scorecard's last innings
-      expect(find.byKey(const ValueKey('match_detail_batting')), findsOneWidget);
-      expect(find.text('c Litton Das b Hasan Mahmud'), findsOneWidget);
-      expect(find.byKey(const ValueKey('match_detail_bowling')), findsOneWidget);
-      expect(find.text('Taskin Ahmed'), findsOneWidget);
-      expect(find.byKey(const ValueKey('match_detail_weather')), findsOneWidget);
-      expect(find.text('Cloudy'), findsOneWidget);
+    testWidgets('T20 chase: plain-language equation, live pill, derived target noted in Info', (tester) async {
+      final api = FakeApi(matchId: 'LIVE01')
+        ..detail = ((_) => ok(t20ChaseDetail()))
+        ..live = ((_) => ok(t20ChaseLive()))
+        ..scorecard = ((_) => err(404, 'Match scorecard not found!!'));
+      await pumpScreen(tester, api, matchId: 'LIVE01');
+      await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_live_badge')), findsOneWidget);
+      expect(textOf(tester, 'match_detail_score_team1'), '45/2');
+      expect(textOf(tester, 'match_detail_situation'), 'UAE Bulls need 87 runs');
+      expect(textOf(tester, 'match_detail_subline'), 'About 95 balls left (est.)');
+      expect(find.text('Target 132'), findsOneWidget);
+      expect(find.textContaining('need 0'), findsNothing);
 
-      expect(api.count('detail'), 1);
+      await tapKey(tester, 'match_detail_tab_info');
+      await settle(tester, 3);
+      expect(textOf(tester, 'match_detail_target_note'), contains('derived: first-innings runs + 1'));
+    });
+
+    testWidgets('ODI first innings: no equation, no projection without maxOvers; other side has no score', (tester) async {
+      final api = FakeApi(matchId: 'w2bXPRS')
+        ..detail = ((_) => ok(odiFirstInningsDetail()))
+        ..live = ((_) => ok(odiFirstInningsLive()))
+        ..scorecard = ((_) => ok(scorecardWith(innings: [inningsJson('England', 'ENG', 126, 2, '19.0')], order: ['t2_1', 't1_1'])['result']));
+      await pumpScreen(tester, api, matchId: 'w2bXPRS');
+      await settle(tester);
+      expect(textOf(tester, 'match_detail_score_team2'), '126/2');
+      expect(find.byKey(const ValueKey('match_detail_score_team1')), findsNothing, reason: 'AUS have not batted: no fake 0');
+      expect(find.byKey(const ValueKey('match_detail_situation')), findsNothing);
+      expect(find.text('CRR 6.63'), findsOneWidget);
+      expect(find.textContaining('At this rate'), findsNothing);
+    });
+
+    testWidgets('upcoming: countdown, local time, venue; no live fetch; Summary tab is not offered; Info is reachable', (tester) async {
+      final api = FakeApi(matchId: 'w2bXPRS')..detail = ((_) => ok(upcomingDetail()));
+      await pumpScreen(tester, api, matchId: 'w2bXPRS');
+      await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_countdown')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_start_time')), findsOneWidget);
+      expect(find.text('Bellerive Oval, Hobart, Australia'), findsWidgets, reason: 'header + Info tab');
+      expect(find.byKey(const ValueKey('match_detail_score_team1')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_over_strip')), findsNothing);
       expect(api.count('live'), 0);
-      expect(api.count('scorecard'), 1);
-      expect(api.count('player'), 1);
+      expect(api.count('scorecard'), 0);
+      // Summary only exists for completed matches: not offered before the match,
+      // and there is no commentary yet, so the page opens on Info.
+      expect(find.byKey(const ValueKey('match_detail_tab_summary')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_info_tab')), findsOneWidget);
+      expect(api.count('commentary'), 0, reason: 'no commentary request for a match that has not started');
+    });
 
+    testWidgets('completed: result headline, winner emphasised, player of the match; no polling', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
+      await pumpScreen(tester, api);
+      await settle(tester);
+      expect(textOf(tester, 'match_detail_result'), 'South Africa won by 5 wickets');
+      expect(find.byKey(const ValueKey('match_detail_winner_team1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_winner_team2')), findsNothing);
+      expect(textOf(tester, 'match_detail_mom_name'), 'Aiden Markram');
+      expect(find.byKey(const ValueKey('match_detail_over_strip')), findsNothing);
+      expect(api.count('live'), 0);
+      final n = api.calls.length;
       await tester.pump(const Duration(minutes: 2));
-      expect(api.calls.length, 3, reason: 'finished match must not poll');
+      expect(api.calls.length, n, reason: 'finished match must not poll');
     });
 
-    testWidgets('Player of the Match tap opens player; series link opens series (guarded against double tap)', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
-      final router = await pumpScreen(tester, api);
+    testWidgets('abandoned: label only, no scores', (tester) async {
+      final api = FakeApi(matchId: 'w2bXPRS')..detail = ((_) => ok(upcomingDetail()..['status'] = 'ABANDONED'));
+      await pumpScreen(tester, api, matchId: 'w2bXPRS');
       await settle(tester);
-
-      await tester.tap(find.byKey(const ValueKey('match_detail_mom_card')));
-      await settle(tester);
-      expect(find.text('player aiden_markram'), findsOneWidget);
-      router.pop();
-      await settle(tester);
-
-      await tester.tap(find.byKey(const ValueKey('match_detail_series_link')));
-      await tester.tap(find.byKey(const ValueKey('match_detail_series_link')), warnIfMissed: false);
-      await settle(tester);
-      expect(find.text('series ser-1 Bangladesh tour of South Africa 2026'), findsOneWidget);
-      router.pop();
-      await settle(tester);
-      expect(find.byKey(const ValueKey('match_detail_series_link')), findsOneWidget, reason: 'only one route was pushed');
+      expect(textOf(tester, 'match_detail_situation'), 'Abandoned');
+      expect(find.byKey(const ValueKey('match_detail_score_team1')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_score_team2')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_countdown')), findsNothing);
+      expect(api.count('live'), 0);
     });
 
-    testWidgets('MoM card hidden when player info fails', (tester) async {
-      final api = FakeApi();
-      api.detail = (_) => ok(completedDetailData());
-      api.player = (_) => err(404, 'Player not found');
+    testWidgets('malformed detail renders TBD teams and no invented scores', (tester) async {
+      final api = FakeApi()
+        ..detail = ((_) => ok({'_id': 'x', 'status': 'LIVE', 'teams': {'t1': {}, 't2': 'bad'}, 'currentOver': 'nope', 'weather': null}))
+        ..live = ((_) => ok({'score': 'nope'}))
+        ..scorecard = ((_) => err(404, 'Match scorecard not found!!'));
       await pumpScreen(tester, api);
       await settle(tester);
-      expect(find.byKey(const ValueKey('match_detail_mom_card')), findsNothing);
-      expect(find.text('South Africa won by 5 wickets'), findsOneWidget);
+      expect(find.text('TBD'), findsNWidgets(2));
+      expect(find.byKey(const ValueKey('match_detail_score_team1')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_series_link')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_batting')), findsNothing);
+      expect(tester.takeException(), isNull);
     });
 
-    testWidgets('tab switching: scorecard prefetched once, tabs kept alive, no refetch', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
+    testWidgets('live match without ball-by-ball data: no (empty) Summary tab, lands on Commentary', (tester) async {
+      // Seen on real data: a live T20 before the first ball (UAEW 0/0,
+      // PNGW yet to bat) had no live payload and rendered an empty Summary.
+      final api = FakeApi()
+        ..detail = ((_) => ok(liveStatusDetail()))
+        ..live = ((_) => err(404, 'Match not found!!'))
+        ..scorecard = ((_) => err(404, 'Match scorecard not found!!'));
       await pumpScreen(tester, api);
       await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_tab_summary')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_tab_commentary')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('Seam strip, sticky bar, feedback motion', () {
+    testWidgets('strip swipes / taps to earlier overs', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
+      await pumpScreen(tester, api);
+      await settle(tester);
+      expect(find.byType(SeamStrip), findsOneWidget);
+      expect(textOf(tester, 'match_detail_over_title'), 'Over 62');
+      await tapKey(tester, 'match_detail_over_older');
+      expect(textOf(tester, 'match_detail_over_title'), 'Over 61');
+      await tester.fling(find.byKey(const ValueKey('match_detail_over_strip')), const Offset(300, 0), 1500);
+      await tester.pump();
+      expect(textOf(tester, 'match_detail_over_title'), 'Over 60');
+      await tester.fling(find.byKey(const ValueKey('match_detail_over_strip')), const Offset(-300, 0), 1500);
+      await tester.pump();
+      expect(textOf(tester, 'match_detail_over_title'), 'Over 61');
+    });
+
+    testWidgets('header collapses into a sticky bar with short score, status and last ball', (tester) async {
+      final api = FakeApi()
+        ..detail = ((_) => ok(liveStatusDetail()))
+        ..commentary = ((_) => ok(commentaryPage(count: 60, totalCount: 60)));
+      await pumpScreen(tester, api);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_collapsed_bar')), findsNothing);
+      await tester.drag(mainScrollable, const Offset(0, -700));
+      await settle(tester, 3);
+      expect(find.byKey(const ValueKey('match_detail_collapsed_bar')), findsOneWidget);
+      expect(textOf(tester, 'match_detail_collapsed_score'), 'RSA 287/4 (62.0)');
+      expect(find.byKey(const ValueKey('match_detail_collapsed_last_ball')), findsOneWidget);
+      // Tabs stay reachable while collapsed.
+      expect(find.byKey(const ValueKey('match_detail_tab_scorecard')).hitTestable(), findsOneWidget);
+      await tester.drag(mainScrollable, const Offset(0, 900));
+      await settle(tester, 3);
+      expect(find.byKey(const ValueKey('match_detail_collapsed_bar')), findsNothing);
+    });
+
+    testWidgets('one new wicket ball: digit roll + wicket band; catch-up: neither', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
+      await pumpScreen(tester, api);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_wicket_band')), findsNothing, reason: 'never on first render');
+
+      api.live = (_) => ok(liveWithNewBalls(['WK'], wickets: 5, wicketName: 'Temba Bavuma'));
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.widget<ScoreText>(find.byKey(const ValueKey('match_detail_score_team1'))).animate, isTrue);
+      expect(textOf(tester, 'match_detail_score_team1'), '287/5');
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('match_detail_wicket_band')), findsOneWidget);
+      expect(find.text('Wicket: Temba Bavuma 19 (55), b Taskin Ahmed'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('match_detail_wicket_band')), findsNothing);
+
+      // Three balls in one poll (app was backgrounded): no replay.
+      api.live = (_) => ok(liveWithNewBalls(['WK', '1', 'WK'], wickets: 6, wicketName: 'Kyle Verreynne'));
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.widget<ScoreText>(find.byKey(const ValueKey('match_detail_score_team1'))).animate, isFalse);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('match_detail_wicket_band')), findsNothing);
+    });
+  });
+
+  group('tabs', () {
+    testWidgets('Summary / Commentary / Scorecard / Stats / Info in a fixed order, kept alive, no refetch', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
+      await pumpScreen(tester, api);
+      await settle(tester);
+      final xs = [for (final t in MatchTab.values) tester.getTopLeft(find.byKey(ValueKey('match_detail_tab_${t.name}'))).dx];
+      expect(xs, orderedEquals([...xs]..sort()));
+      expect(MatchTab.values.map((t) => t.label), ['Summary', 'Commentary', 'Scorecard', 'Stats', 'Info']);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_digest_0')), findsOneWidget);
 
       await tapKey(tester, 'match_detail_tab_scorecard');
       await settle(tester, 2);
       final sc = tester.widget<MatchScorecardTab>(find.byType(MatchScorecardTab));
       expect(sc.scorecard, isNotNull);
-      expect(J.map(sc.scorecard!['result'])['innings'], isA<List>());
-      expect(sc.loading, isFalse);
-      expect(find.byKey(const ValueKey('match_detail_live_tab')), findsNothing);
+      expect(find.byKey(const ValueKey('scorecard_body')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsNothing);
 
       await tapKey(tester, 'match_detail_tab_stats');
+      await settle(tester, 3);
       expect(tester.widget<MatchStatsTab>(find.byType(MatchStatsTab)).matchId, id);
-      expect(find.byType(MatchScorecardTab), findsNothing); // offstage
-      expect(find.byType(MatchScorecardTab, skipOffstage: false), findsOneWidget); // but alive
+      expect(find.byKey(const ValueKey('stats_body')), findsOneWidget);
+      expect(find.byType(MatchScorecardTab), findsNothing);
+      expect(find.byType(MatchScorecardTab, skipOffstage: false), findsOneWidget);
 
-      await tapKey(tester, 'match_detail_tab_playingXI');
-      final xi = tester.widget<MatchPlayingXITab>(find.byType(MatchPlayingXITab));
-      expect(xi.isLive, isFalse);
+      await tapKey(tester, 'match_detail_tab_info');
+      await settle(tester, 3);
+      expect(find.byKey(const ValueKey('match_detail_info_tab')), findsOneWidget);
+      expect(find.text('Bangladesh opt to bat'), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_weather')), findsOneWidget);
+      expect(tester.widget<MatchPlayingXITab>(find.byType(MatchPlayingXITab)).isLive, isFalse);
 
-      await tapKey(tester, 'match_detail_tab_scorecard');
-      await tapKey(tester, 'match_detail_tab_live');
+      await tapKey(tester, 'match_detail_tab_commentary');
+      await settle(tester, 3);
+      expect(find.text('61.6', skipOffstage: false), findsOneWidget);
+
+      await tapKey(tester, 'match_detail_tab_summary');
       await settle(tester, 2);
-      expect(find.byKey(const ValueKey('match_detail_live_tab')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsOneWidget);
       expect(api.count('scorecard'), 1);
       expect(api.count('detail'), 1);
+      expect(api.count('commentary'), 1);
     });
 
-    testWidgets('pull-to-refresh refetches detail and (finished) scorecard', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
+    testWidgets('Summary tab only for a completed match; live opens on Commentary', (tester) async {
+      final live = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
+      await pumpScreen(tester, live);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('match_detail_tab_summary')), findsNothing);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsNothing);
+      for (final t in [MatchTab.commentary, MatchTab.scorecard, MatchTab.stats, MatchTab.info]) {
+        expect(find.byKey(ValueKey('match_detail_tab_${t.name}')), findsOneWidget, reason: t.label);
+      }
+    });
+
+    testWidgets('completed match keeps the Summary tab and opens on it', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
       await pumpScreen(tester, api);
       await settle(tester);
-      await tester.fling(mainScrollable, const Offset(0, 500), 1200);
-      await tester.pump();
-      await settle(tester, 12);
-      expect(api.count('detail'), 2);
-      expect(api.count('scorecard'), 2);
-      expect(find.text('South Africa won by 5 wickets'), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_tab_summary')), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_summary_tab')), findsOneWidget);
     });
   });
 
-  group('commentary tab', () {
-    testWidgets('loads lazily once, filters, keeps state across tab switches', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
+  group('commentary', () {
+    testWidgets('loads lazily once, key-moment filters, keeps state across tab switches', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
       final gate = Completer<http.Response>();
       api.commentary = (_) => gate.future;
       await pumpScreen(tester, api);
@@ -192,56 +378,60 @@ void main() {
       expect(api.count('commentary'), 0);
 
       await tapKey(tester, 'match_detail_tab_commentary');
-      expect(find.text('Loading commentary...'), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_commentary_loading')), findsOneWidget);
       gate.complete(ok(J.map(fixture('match_commentary')['data'])));
       await settle(tester);
-      expect(api.count('commentary'), 1);
-      expect(find.text('61.6', skipOffstage: false), findsOneWidget); // newest first
-      expect(find.byKey(const ValueKey('match_detail_commentary_load_more')), findsNothing); // 30 < 60
+      expect(find.text('61.6', skipOffstage: false), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_over_end_62'), skipOffstage: false), findsOneWidget);
 
-      await tapKey(tester, 'match_detail_commentary_filter_wicket');
+      await tapKey(tester, 'match_detail_commentary_filter_wickets');
       expect(find.text('58.6', skipOffstage: false), findsOneWidget);
       expect(find.text('61.6', skipOffstage: false), findsNothing);
-      await tapKey(tester, 'match_detail_commentary_filter_six');
-      expect(find.byKey(const ValueKey('match_detail_commentary_no_match'), skipOffstage: false), findsOneWidget);
+      await tapKey(tester, 'match_detail_commentary_filter_boundaries');
+      expect(find.text('61.2', skipOffstage: false), findsOneWidget);
       await tapKey(tester, 'match_detail_commentary_filter_all');
-      expect(find.byKey(const ValueKey('match_detail_commentary_team_t1_1')), findsOneWidget);
-      expect(find.text('South Africa'), findsWidgets);
 
-      await tapKey(tester, 'match_detail_tab_live');
+      await tapKey(tester, 'match_detail_tab_summary');
       await tapKey(tester, 'match_detail_tab_commentary');
       await settle(tester, 2);
       expect(api.count('commentary'), 1, reason: 'tab switch must not refetch');
-      expect(find.text('61.6', skipOffstage: false), findsOneWidget);
     });
 
-    testWidgets('Load more requests page 2 exactly once and appends', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
-      final page2 = Completer<http.Response>();
-      api.commentary = (req) =>
-          req.url.queryParameters['page'] == '1' ? ok(commentaryPage(count: 60, totalCount: 70)) : page2.future;
+    testWidgets('refresh while reading: no jump, "N new balls" pill, deduped on apply', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
+      var page = commentaryPage(count: 60, totalCount: 60);
+      api.commentary = (_) => ok(page);
       await pumpScreen(tester, api);
       await settle(tester);
       await tapKey(tester, 'match_detail_tab_commentary');
       await settle(tester);
+      expect(api.count('commentary'), 1);
 
-      final loadMore = find.byKey(const ValueKey('match_detail_commentary_load_more'));
-      await tester.scrollUntilVisible(loadMore, 600, scrollable: mainScrollable, maxScrolls: 200);
-      await tester.tap(loadMore);
-      await tester.pump();
-      expect(find.byKey(const ValueKey('match_detail_commentary_loading_more')), findsOneWidget);
-      expect(api.callsOf('commentary').where((u) => u.queryParameters['page'] == '2').length, 1);
-      page2.complete(ok(commentaryPage(count: 10, totalCount: 70, startOver: 150)));
-      await settle(tester);
-      expect(loadMore, findsNothing); // 10 < 60 → no more
-      expect(api.callsOf('commentary').length, 2);
-      await tester.scrollUntilVisible(find.text('149.5'), 600, scrollable: mainScrollable, maxScrolls: 200);
-      expect(find.text('149.5'), findsOneWidget);
+      // Read further down the feed.
+      await tester.scrollUntilVisible(find.text('197.6'), 400, scrollable: mainScrollable);
+      await settle(tester, 3);
+      final anchor = find.text('197.6');
+      expect(anchor, findsOneWidget);
+      final y = tester.getTopLeft(anchor).dy;
+
+      // 6 new deliveries arrive (over 201) plus the same 54 older ones.
+      final fresh = commentaryPage(count: 6, totalCount: 0, startOver: 201);
+      page = {...page, 'balls': [...J.list(fresh['balls']), ...J.list(page['balls']).take(54)]};
+      await tester.pump(const Duration(seconds: 10));
+      await settle(tester, 2);
+      expect(api.count('commentary'), greaterThanOrEqualTo(2));
+      expect(tester.getTopLeft(anchor).dy, y, reason: 'the feed must not move under the reader');
+      expect(find.text('6 new balls'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('match_detail_commentary_new_pill')));
+      await settle(tester, 4);
+      expect(find.byKey(const ValueKey('match_detail_commentary_new_pill')), findsNothing);
+      expect(find.text('201.6'), findsOneWidget);
+      expect(find.text('200.6', skipOffstage: false), findsOneWidget, reason: 'no duplicates after merge');
     });
 
-    testWidgets('404 → "Commentary not available"; 500 → error + Retry', (tester) async {
-      final api = FakeApi();
-      api.detail = (_) => ok(completedDetailData());
+    testWidgets('404 → "Commentary not available"; 500 → error + retry', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
       api.commentary = (_) => err(404, 'Commentary not found');
       await pumpScreen(tester, api);
       await settle(tester);
@@ -250,7 +440,6 @@ void main() {
       expect(find.text('Commentary not available'), findsOneWidget);
 
       api.commentary = (_) => err(500);
-      // a new screen instance to hit the error path
       await tester.pumpWidget(const SizedBox());
       await pumpScreen(tester, api);
       await settle(tester);
@@ -258,93 +447,59 @@ void main() {
       await settle(tester);
       expect(find.byKey(const ValueKey('match_detail_commentary_error')), findsOneWidget);
       api.commentary = (_) => ok(J.map(fixture('match_commentary')['data']));
-      await tapKey(tester, 'match_detail_commentary_retry');
+      await tester.tap(find.text('Try again'));
       await settle(tester);
       expect(find.text('61.6', skipOffstage: false), findsOneWidget);
     });
   });
 
-  group('live match (crafted from fixtures)', () {
-    testWidgets('live header, roles, live scores, current over, batting pair, bowler, recent overs', (tester) async {
-      final api = FakeApi();
-      await pumpScreen(tester, api);
-      await settle(tester);
-
-      expect(find.byKey(const ValueKey('match_detail_live_badge')), findsOneWidget);
-      expect(tester.widget<Text>(find.descendant(of: find.byKey(const ValueKey('match_detail_role_team1')), matching: find.byType(Text))).data, 'BAT');
-      expect(tester.widget<Text>(find.descendant(of: find.byKey(const ValueKey('match_detail_role_team2')), matching: find.byType(Text))).data, 'BOWL');
-      expect(textOf(tester, 'match_detail_score_team1'), '287/4 (62.0)'); // live inningsStats win over API score
-      expect(find.byKey(const ValueKey('match_detail_current_over')), findsOneWidget);
-      expect(find.text('Current Over (61)'), findsOneWidget);
-      expect(find.text('5 runs • 0 wickets'), findsOneWidget);
-      expect(find.text('Ryan Rickelton *'), findsOneWidget);
-      expect(find.text('Temba Bavuma'), findsOneWidget);
-      expect(find.text('Taskin Ahmed'), findsOneWidget);
-      expect(find.byKey(const ValueKey('match_detail_live_commentary')), findsOneWidget);
-      expect(find.textContaining('·  Hasan Mahmud', skipOffstage: false), findsNothing);
-      await tapKey(tester, 'match_detail_recent_overs_toggle');
-      expect(find.textContaining('·  Hasan Mahmud', skipOffstage: false), findsWidgets);
-      expect(api.count('player'), 0);
-    });
-
-    testWidgets('polls detail + live every 15s; never overlaps; stops when match ends', (tester) async {
-      final api = FakeApi();
+  group('polling', () {
+    testWidgets('detail + live every 10 s; never overlaps; stops when the match ends', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
       await pumpScreen(tester, api);
       await settle(tester);
       expect(api.count('detail'), 1);
       expect(api.count('live'), 1);
 
-      await tester.pump(const Duration(seconds: 15));
+      await tester.pump(const Duration(seconds: 10));
       await tester.pump();
       expect(api.count('detail'), 2);
       expect(api.count('live'), 2);
 
-      // slow live response → no overlapping polls
       final slow = Completer<http.Response>();
       api.live = (_) => slow.future;
-      await tester.pump(const Duration(seconds: 15));
+      await tester.pump(const Duration(seconds: 10));
       await tester.pump();
       expect(api.count('live'), 3);
       await tester.pump(const Duration(minutes: 1));
       expect(api.count('live'), 3);
-      expect(api.count('detail'), 3);
       slow.complete(ok(J.map(fixture('match_live')['data'])));
       await tester.pump();
 
-      // match finishes on the next poll → polling stops, scorecard + MoM load
       api.live = (_) => ok(J.map(fixture('match_live')['data']));
       api.detail = (_) => ok(completedDetailData());
-      await tester.pump(const Duration(seconds: 15));
+      await tester.pump(const Duration(seconds: 10));
       await settle(tester);
-      expect(api.count('detail'), 4);
       expect(find.text('South Africa won by 5 wickets'), findsOneWidget);
       expect(find.byKey(const ValueKey('match_detail_live_badge')), findsNothing);
-      expect(api.count('scorecard'), 1);
       expect(api.count('player'), 1);
       final n = api.calls.length;
-      await tester.pump(const Duration(minutes: 2));
+      await tester.pump(const Duration(minutes: 3));
       expect(api.calls.length, n);
     });
 
-    testWidgets('unchanged poll responses do not rebuild the header', (tester) async {
-      final api = FakeApi();
+    testWidgets('unchanged poll responses do not rebuild the header score', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
       await pumpScreen(tester, api);
       await settle(tester);
       final before = tester.widget(find.byKey(const ValueKey('match_detail_score_team1')));
-      await tester.pump(const Duration(seconds: 15));
+      await tester.pump(const Duration(seconds: 10));
       await settle(tester, 2);
       expect(identical(tester.widget(find.byKey(const ValueKey('match_detail_score_team1'))), before), isTrue);
-
-      final changed = J.map(fixture('match_live')['data']);
-      J.map(J.at(changed, 'score.teams.team1'))['inningsStats'] = {'runs': 291, 'wickets': 4, 'overs': '62.4'};
-      api.live = (_) => ok(changed);
-      await tester.pump(const Duration(seconds: 15));
-      await settle(tester, 2);
-      expect(textOf(tester, 'match_detail_score_team1'), '291/4 (62.4)');
     });
 
-    testWidgets('pauses while app is backgrounded; refreshes on resume', (tester) async {
-      final api = FakeApi();
+    testWidgets('pauses while backgrounded; refreshes on resume', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
       await pumpScreen(tester, api);
       await settle(tester);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
@@ -361,22 +516,22 @@ void main() {
       expect(api.count('live'), 2);
     });
 
-    testWidgets('pauses while another route covers it; resumes on pop; stops after dispose', (tester) async {
-      final api = FakeApi();
+    testWidgets('pauses while another route covers it; series link is tap-guarded', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
       final router = await pumpScreen(tester, api);
       await settle(tester);
       await tester.tap(find.byKey(const ValueKey('match_detail_series_link')));
+      await tester.tap(find.byKey(const ValueKey('match_detail_series_link')), warnIfMissed: false);
       await settle(tester, 10);
       expect(find.text('series ser-1 Bangladesh tour of South Africa 2026'), findsOneWidget);
       final n = api.calls.length;
       await tester.pump(const Duration(minutes: 2));
       expect(api.calls.length, n, reason: 'covered route must not poll');
-
       router.pop();
       await settle(tester, 10);
+      expect(find.byKey(const ValueKey('match_detail_series_link')), findsOneWidget, reason: 'only one route was pushed');
       expect(api.count('detail'), 2, reason: 'immediate refresh after being uncovered');
-
-      router.pop(); // leave the match screen
+      router.pop();
       await settle(tester, 10);
       expect(find.text('home'), findsOneWidget);
       final m = api.calls.length;
@@ -384,91 +539,59 @@ void main() {
       expect(api.calls.length, m, reason: 'disposed screen must not poll');
     });
 
-    testWidgets('scorecard tab polls every 10s only while it is the active tab', (tester) async {
-      final api = FakeApi();
+    testWidgets('scorecard polls every 10 s only on its tab', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(liveStatusDetail()));
       await pumpScreen(tester, api);
       await settle(tester);
+      final base = api.count('scorecard');
       await tapKey(tester, 'match_detail_tab_scorecard');
       await settle(tester, 2);
-      expect(api.count('scorecard'), 1);
       await tester.pump(const Duration(seconds: 10));
       await tester.pump();
-      expect(api.count('scorecard'), 2);
-      await tapKey(tester, 'match_detail_tab_live');
+      expect(api.count('scorecard'), greaterThan(base));
+      final on = api.count('scorecard');
+      await tapKey(tester, 'match_detail_tab_commentary');
       await tester.pump(const Duration(seconds: 30));
       await tester.pump();
-      expect(api.count('scorecard'), 2);
-    });
-
-    testWidgets('keeps last batting pair when a poll briefly omits both batters', (tester) async {
-      final api = FakeApi();
-      await pumpScreen(tester, api);
-      await settle(tester);
-      final noBatters = J.map(fixture('match_live')['data']);
-      J.map(noBatters['score'])
-        ..remove('striker')
-        ..remove('nonStriker');
-      api.live = (_) => ok(noBatters);
-      await tester.pump(const Duration(seconds: 15));
-      await settle(tester, 2);
-      expect(find.text('Ryan Rickelton *'), findsOneWidget);
-    });
-
-    testWidgets('commentary tab polls page 1 every 20s while live', (tester) async {
-      final api = FakeApi();
-      await pumpScreen(tester, api);
-      await settle(tester);
-      await tapKey(tester, 'match_detail_tab_commentary');
-      await settle(tester);
-      expect(api.count('commentary'), 1);
-      await tester.pump(const Duration(seconds: 20));
-      await tester.pump();
-      expect(api.count('commentary'), 2);
-      await tapKey(tester, 'match_detail_tab_live');
-      await tester.pump(const Duration(seconds: 60));
-      expect(api.count('commentary'), 2, reason: 'no commentary polling off-tab');
+      expect(api.count('scorecard'), on, reason: 'off the tab only the 60 s header refresh runs');
     });
   });
 
-  group('rewarded gates', () {
-    testWidgets('scorecard / playing XI are gated when the rewarded placement is enabled and ads are ready', (tester) async {
+  group('rewarded gates, errors', () {
+    testWidgets('scorecard and line-ups are gated when the rewarded placement is ready', (tester) async {
       AdsManager.instance.debugReset(backend: const NoopAdsBackend(), ready: true);
       addTearDown(() => AdsManager.instance.debugReset());
-      final api = FakeApi()..detail = (_) => ok(completedDetailData());
+      final api = FakeApi()..detail = ((_) => ok(completedDetailData()));
       await pumpScreen(tester, api);
       await settle(tester);
       await tapKey(tester, 'match_detail_tab_scorecard');
       await settle(tester, 2);
       expect(find.byKey(const ValueKey('match_detail_reward_gate_scorecard')), findsOneWidget);
-      expect(find.text('Unlock Full Scoreboard'), findsOneWidget);
       expect(find.byType(MatchScorecardTab), findsNothing);
-      await tapKey(tester, 'match_detail_tab_playingXI');
+      await tapKey(tester, 'match_detail_tab_info');
       await settle(tester, 2);
-      expect(find.text('Unlock Playing XI'), findsOneWidget);
-      expect(find.byType(MatchPlayingXITab, skipOffstage: false), findsNothing, reason: 'gated tab must not mount/fetch');
-      // no fill (Noop backend) → stays locked, no crash
+      await tester.scrollUntilVisible(find.byKey(const ValueKey('match_detail_reward_gate_playing_xi')), 300, scrollable: mainScrollable);
+      expect(find.byType(MatchPlayingXITab, skipOffstage: false), findsNothing, reason: 'gated section must not mount/fetch');
       await tester.tap(find.byKey(const ValueKey('match_detail_reward_gate_playing_xi_button')));
       await settle(tester, 2);
-      expect(find.text('Unlock Playing XI'), findsOneWidget);
+      expect(find.byKey(const ValueKey('match_detail_reward_gate_playing_xi')), findsOneWidget);
+      expect(api.count('playing11'), 0);
     });
-  });
 
-  group('errors & edge cases', () {
-    testWidgets('server 500 → error view; Retry recovers', (tester) async {
-      final api = FakeApi()..detail = (_) => err(500, 'Internal');
+    testWidgets('server 500 → error view; Try again recovers; Go back pops', (tester) async {
+      final api = FakeApi()..detail = ((_) => err(500, 'Internal'));
       await pumpScreen(tester, api);
       await settle(tester);
       expect(find.byKey(const ValueKey('match_detail_error')), findsOneWidget);
       expect(find.text('Internal'), findsOneWidget);
-      expect(find.byKey(const ValueKey('match_detail_go_back')), findsOneWidget);
       api.detail = (_) => ok(completedDetailData());
       await tester.tap(find.byKey(const ValueKey('match_detail_retry')));
       await settle(tester);
       expect(find.text('South Africa won by 5 wickets'), findsOneWidget);
     });
 
-    testWidgets('network error message; Go Back pops', (tester) async {
-      final api = FakeApi()..detail = (_) => throw http.ClientException('offline');
+    testWidgets('network error message; Go back pops', (tester) async {
+      final api = FakeApi()..detail = ((_) => throw http.ClientException('offline'));
       await pumpScreen(tester, api);
       await settle(tester);
       expect(find.text('Unable to reach the server. Check your connection and try again.'), findsOneWidget);
@@ -477,38 +600,17 @@ void main() {
       expect(find.text('home'), findsOneWidget);
     });
 
-    testWidgets('empty data → "Failed to load match details"', (tester) async {
-      final api = FakeApi()..detail = (_) => ok(null);
+    testWidgets('empty data and missing id', (tester) async {
+      final api = FakeApi()..detail = ((_) => ok(null));
       await pumpScreen(tester, api);
       await settle(tester);
-      expect(find.text('Failed to load match details'), findsOneWidget);
-    });
-
-    testWidgets('missing matchId', (tester) async {
-      await tester.pumpWidget(const MaterialApp(home: MatchDetailScreen(matchId: '')));
+      expect(find.text('Match details are not available'), findsOneWidget);
+      await tester.pumpWidget(MaterialApp(theme: buildAppTheme(), home: const MatchDetailScreen(matchId: '')));
       expect(find.text('Match ID is required'), findsOneWidget);
       expect(find.byKey(const ValueKey('match_detail_retry')), findsNothing);
     });
 
-    testWidgets('malformed detail (no teams/scores/series) renders placeholders', (tester) async {
-      final api = FakeApi()
-        ..detail = (_) => ok({
-              '_id': 'x',
-              'status': 'NOT_STARTED',
-              'teams': {'t1': {}, 't2': 'bad'},
-              'currentOver': 'nope',
-              'weather': null,
-            });
-      await pumpScreen(tester, api);
-      await settle(tester);
-      expect(find.text('TBD'), findsNWidgets(2));
-      expect(textOf(tester, 'match_detail_score_team1'), '-');
-      expect(find.byKey(const ValueKey('match_detail_series_link')), findsNothing);
-      expect(find.byKey(const ValueKey('match_detail_batting')), findsNothing);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('very long names do not overflow', (tester) async {
+    testWidgets('very long names at 320 dp and dark theme do not overflow', (tester) async {
       final api = FakeApi();
       final d = completedDetailData();
       (d['teams'] as Map)['t1']['name'] = 'An Extremely Long Team Name That Goes On And On Forever XI';
@@ -517,7 +619,7 @@ void main() {
       tester.view.physicalSize = const Size(320 * 3, 640 * 3);
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.reset);
-      await pumpScreen(tester, api);
+      await pumpScreen(tester, api, mode: ThemeMode.dark);
       await settle(tester);
       expect(tester.takeException(), isNull);
     });

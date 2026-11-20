@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- CrickBex brand blue (AppColors.pitch / RN theme.pitch). -->
-    <color name="splash_background">#0B5CD4</color>
-    <color name="ic_launcher_background">#0B5CD4</color>
+    <!-- Native splash: always the dark canvas (#17130F), in light and dark mode, so the
+         dark animated intro follows without a light-to-dark flash. -->
+    <color name="splash_background">#17130F</color>
+    <!-- Window behind the Flutter view before its first frame: the theme canvas
+         (light #F4F4F3 here, dark #17130F in values-night/). -->
+    <color name="app_canvas">#F4F4F3</color>
 </resources>

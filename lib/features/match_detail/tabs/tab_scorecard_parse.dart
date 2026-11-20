@@ -126,10 +126,25 @@ class ScInning {
 }
 
 class ScorecardView {
-  const ScorecardView({required this.target, required this.innings, required this.signature});
+  const ScorecardView({
+    required this.target,
+    required this.innings,
+    required this.signature,
+    this.inningsOrder = const [],
+    this.maxOvers,
+  });
   final String? target;
   final List<ScInning> innings;
   final String signature;
+
+  /// Raw `inningsOrder` keys ("t2_1", "t1_1") aligned with [innings].
+  final List<String> inningsOrder;
+
+  /// Raw `maxOvers` ('' → null).
+  final String? maxOvers;
+
+  /// Provider target as a number (null when absent).
+  int? get targetRuns => target == null ? null : int.tryParse(target!.trim());
 
   static const empty = ScorecardView(target: null, innings: [], signature: '');
 
@@ -256,5 +271,14 @@ ScorecardView parseScorecard(JsonMap? input) {
       sig.write('y:${x.id}:${x.name}|');
     }
   }
-  return ScorecardView(target: target, innings: innings, signature: sig.toString());
+  final order = J.list(sc['inningsOrder']).map((e) => J.str(e)).toList(growable: false);
+  final maxOvers = J.text(sc['maxOvers']);
+  sig.write('O:${order.join(',')}|M:$maxOvers');
+  return ScorecardView(
+    target: target,
+    innings: innings,
+    signature: sig.toString(),
+    inningsOrder: order,
+    maxOvers: maxOvers,
+  );
 }

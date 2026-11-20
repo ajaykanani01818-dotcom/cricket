@@ -1,19 +1,104 @@
 import 'package:flutter/material.dart';
 
+import '../brand/brand.dart';
 import '../theme/app_theme.dart';
+import 'live_pill.dart';
 
-/// Ported from RN `AppBar` (white bar, logo + title/subtitle, optional back/menu).
+/// The Cric Ticker logo (orange C + "Cric Ticker"). Picks the light or dark
+/// artwork from the current theme brightness ([brightness] overrides it, e.g.
+/// on a dark band in the light theme) and decodes it at the display size.
+class BrandWordmark extends StatelessWidget {
+  const BrandWordmark({super.key, this.height = 32, this.brightness});
+
+  /// Rendered height of the whole logo (the C is the tallest part; the
+  /// lettering is about half of it).
+  final double height;
+
+  /// Brightness of the surface the logo sits on; defaults to the theme's.
+  final Brightness? brightness;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark =
+        (brightness ?? Theme.of(context).brightness) == Brightness.dark;
+    final width = height * Brand.logoAspect;
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 2;
+    final cacheWidth = (width * dpr).ceil().clamp(
+      1,
+      Brand.logoPx.width.toInt(),
+    );
+    return Image.asset(
+      dark ? Brand.logoDark : Brand.logoLight,
+      key: ValueKey(dark ? 'brand_wordmark_dark' : 'brand_wordmark_light'),
+      height: height,
+      width: width,
+      cacheWidth: cacheWidth,
+      fit: BoxFit.contain,
+      filterQuality: FilterQuality.medium,
+      gaplessPlayback: true,
+      semanticLabel: Brand.appName,
+      errorBuilder: (context, _, _) => SizedBox(
+        height: height,
+        width: width,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text(
+            Brand.appName,
+            style: AppFont.style(
+              size: height * 0.55,
+              weight: FontWeight.w800,
+              color: dark ? Brand.splashInk : context.palette.ink,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 48 dp icon button used in the top bars (ink icon, brandTint ripple).
+class TopBarIconButton extends StatelessWidget {
+  const TopBarIconButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    required this.tooltip,
+    this.color,
+  });
+  final IconData icon;
+  final VoidCallback onPressed;
+  final String tooltip;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    onPressed: onPressed,
+    tooltip: tooltip,
+    icon: Icon(icon, color: color ?? context.palette.ink, size: 24),
+  );
+}
+
+bool _isBrandTitle(String t) =>
+    t == Brand.appName || t.toLowerCase() == 'crickbex';
+
+/// App top bar: surface, hairline bottom edge, no shadow. Wordmark (or a
+/// title) on the left, actions on the right: [onSearch] adds the search
+/// icon (key `app_bar_search`), [actions] any others, [onMorePress] the menu.
 class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
   const AppTopBar({
     super.key,
-    this.title = 'CrickBex',
-    this.subtitle = 'Live Scores & Updates',
+    this.title = Brand.appName,
+    this.subtitle,
     this.onBack,
     this.onMorePress,
     this.moreOnLeft = false,
     this.rightAccessory,
+    this.onSearch,
+    this.actions = const [],
   });
 
+  /// [Brand.appName] renders the wordmark; anything else renders as text.
   final String title;
   final String? subtitle;
   final VoidCallback? onBack;
@@ -21,127 +106,98 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
   final bool moreOnLeft;
   final Widget? rightAccessory;
 
-  @override
-  Size get preferredSize => const Size.fromHeight(60);
+  /// Search slot (PRD: search icon in the Home and Matches bars).
+  final VoidCallback? onSearch;
+  final List<Widget> actions;
 
-  Widget _sideButton(
-    IconData icon,
-    VoidCallback onTap,
-    Color color,
-    String key,
-    String label,
-  ) => Semantics(
-    button: true,
-    label: label,
-    child: InkResponse(
-      key: ValueKey(key),
-      onTap: onTap,
-      radius: 24,
-      child: Container(
-        width: 36,
-        height: 36,
-        decoration: BoxDecoration(
-          color: AppColors.white.withValues(alpha: 0.55),
-          shape: BoxShape.circle,
-          border: Border.all(color: AppColors.glassBorder),
-        ),
-        child: Icon(icon, size: 22, color: color),
-      ),
-    ),
-  );
+  static const double barHeight = 56;
+
+  @override
+  Size get preferredSize => const Size.fromHeight(barHeight);
 
   @override
   Widget build(BuildContext context) {
+    final p = context.palette;
     final r = Responsive.of(context);
-    Widget? left;
-    Widget? right;
-    if (onBack != null) {
-      left = _sideButton(
-        Icons.chevron_left,
-        onBack!,
-        AppColors.pitch,
-        'app_bar_back',
-        'Back',
-      );
-    } else if (onMorePress != null && moreOnLeft) {
-      left = _sideButton(
-        Icons.menu,
-        onMorePress!,
-        AppColors.text,
-        'app_bar_menu',
-        'Menu',
-      );
-    }
-    if (onMorePress != null && !moreOnLeft) {
-      right = _sideButton(
-        Icons.menu,
-        onMorePress!,
-        AppColors.text,
-        'app_bar_menu',
-        'Menu',
-      );
-    }
+    final leading = <Widget>[
+      if (onBack != null)
+        Semantics(
+          button: true,
+          label: 'Back',
+          child: IconButton(
+            key: const ValueKey('app_bar_back'),
+            onPressed: onBack,
+            icon: Icon(Icons.arrow_back, color: p.ink),
+          ),
+        )
+      else if (onMorePress != null && moreOnLeft)
+        IconButton(
+          key: const ValueKey('app_bar_menu'),
+          onPressed: onMorePress,
+          tooltip: 'Menu',
+          icon: Icon(Icons.menu, color: p.ink),
+        ),
+    ];
+    final trailing = <Widget>[
+      ...actions,
+      if (onSearch != null)
+        IconButton(
+          key: const ValueKey('app_bar_search'),
+          onPressed: onSearch,
+          tooltip: 'Search',
+          icon: Icon(Icons.search, color: p.ink),
+        ),
+      ?rightAccessory,
+      if (onMorePress != null && !moreOnLeft)
+        IconButton(
+          key: const ValueKey('app_bar_menu'),
+          onPressed: onMorePress,
+          tooltip: 'Menu',
+          icon: Icon(Icons.menu, color: p.ink),
+        ),
+    ];
+    final titleWidget = _isBrandTitle(title)
+        ? Align(
+            alignment: Alignment.centerLeft,
+            child: BrandWordmark(height: r.isSmall ? 28 : 32),
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.screenTitle.copyWith(fontSize: 20),
+              ),
+              if (subtitle != null)
+                Text(
+                  subtitle!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.small,
+                ),
+            ],
+          );
     return Material(
-      color: AppColors.card,
-      elevation: 2,
-      shadowColor: const Color(0x22000000),
+      color: p.surface,
       child: SafeArea(
         bottom: false,
         child: Container(
-          height: 60,
-          padding: EdgeInsets.symmetric(horizontal: r.horizontalPadding),
-          decoration: const BoxDecoration(
-            border: Border(bottom: BorderSide(color: AppColors.border)),
+          constraints: const BoxConstraints(minHeight: barHeight),
+          padding: EdgeInsets.only(
+            left: leading.isEmpty ? r.horizontalPadding + 4 : 4,
+            right: 4,
           ),
-          child: Stack(
-            alignment: Alignment.center,
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: p.hairline)),
+          ),
+          child: Row(
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Image.asset(
-                    'assets/images/logo.png',
-                    width: r.isSmall ? 28 : 32,
-                    height: r.isSmall ? 28 : 32,
-                    semanticLabel: 'CrickBex logo',
-                  ),
-                  const SizedBox(width: Spacing.md),
-                  Flexible(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: r.isSmall ? 16 : 18,
-                            fontWeight: FontWeight.w800,
-                            color: AppColors.text,
-                          ),
-                        ),
-                        if (subtitle != null)
-                          Text(
-                            subtitle!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: AppColors.textSecondary,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              if (left != null)
-                Align(alignment: Alignment.centerLeft, child: left),
-              if (right != null)
-                Align(alignment: Alignment.centerRight, child: right),
-              if (rightAccessory != null)
-                Align(alignment: Alignment.centerRight, child: rightAccessory),
+              ...leading,
+              Expanded(child: titleWidget),
+              ...trailing,
             ],
           ),
         ),
@@ -150,86 +206,91 @@ class AppTopBar extends StatelessWidget implements PreferredSizeWidget {
   }
 }
 
-/// Ported from RN `ScreenTitle`: brand-blue band with spaced uppercase title.
+/// Screen header used by every tab/detail screen: surface bar with a
+/// left-aligned sentence-case title (the old blue band with spaced capitals
+/// is gone). Shows a back arrow automatically when the route can pop
+/// ([showBack] overrides), plus an optional action ([rightIcon]) and a
+/// search slot.
 class ScreenTitle extends StatelessWidget {
   const ScreenTitle({
     super.key,
     required this.title,
     this.rightIcon,
     this.onRightPress,
+    this.onSearch,
+    this.showBack,
+    this.actions = const [],
   });
   final String title;
   final IconData? rightIcon;
   final VoidCallback? onRightPress;
+  final VoidCallback? onSearch;
+
+  /// null = automatic (route can pop).
+  final bool? showBack;
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
+    final p = context.palette;
     final r = Responsive.of(context);
+    final canPop = showBack ?? (ModalRoute.of(context)?.canPop ?? false);
+    final brand = _isBrandTitle(title);
     return Material(
-      color: AppColors.pitch,
-      elevation: 6,
-      // Full-width band (a Stack with only centered children would otherwise
-      // shrink to the title's width inside a centered Column).
+      color: p.surface,
       child: SizedBox(
         width: double.infinity,
         child: SafeArea(
           bottom: false,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              vertical: 14,
-              horizontal: Spacing.lg,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: AppTopBar.barHeight),
+            padding: EdgeInsets.only(
+              left: canPop ? 4 : r.horizontalPadding + 4,
+              right: 4,
+              top: 4,
+              bottom: 4,
             ),
-            child: Stack(
-              alignment: Alignment.center,
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: p.hairline)),
+            ),
+            child: Row(
               children: [
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: List.generate(
-                        3,
-                        (_) => Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 3),
-                          width: 3,
-                          height: 3,
-                          decoration: const BoxDecoration(
-                            color: Color(0xB3FFFFFF),
-                            shape: BoxShape.circle,
+                if (canPop)
+                  IconButton(
+                    key: const ValueKey('screen_title_back'),
+                    tooltip: 'Back',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                    icon: Icon(Icons.arrow_back, color: p.ink),
+                  ),
+                Expanded(
+                  child: brand
+                      ? Align(
+                          alignment: Alignment.centerLeft,
+                          child: BrandWordmark(height: r.isSmall ? 28 : 32),
+                        )
+                      : Semantics(
+                          header: true,
+                          child: Text(
+                            title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.screenTitle,
                           ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      title.toUpperCase(),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: r.isSmall ? 16 : 18,
-                        fontWeight: FontWeight.w800,
-                        color: AppColors.white,
-                        letterSpacing: 4,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Container(
-                      width: 24,
-                      height: 2,
-                      decoration: BoxDecoration(
-                        color: AppColors.white,
-                        borderRadius: BorderRadius.circular(1),
-                      ),
-                    ),
-                  ],
                 ),
+                ...actions,
+                if (onSearch != null)
+                  IconButton(
+                    key: const ValueKey('app_bar_search'),
+                    onPressed: onSearch,
+                    tooltip: 'Search',
+                    icon: Icon(Icons.search, color: p.ink),
+                  ),
                 if (rightIcon != null && onRightPress != null)
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: IconButton(
-                      key: const ValueKey('screen_title_action'),
-                      onPressed: onRightPress,
-                      icon: Icon(rightIcon, color: AppColors.white),
-                    ),
+                  IconButton(
+                    key: const ValueKey('screen_title_action'),
+                    onPressed: onRightPress,
+                    icon: Icon(rightIcon, color: p.ink),
                   ),
               ],
             ),
@@ -240,7 +301,7 @@ class ScreenTitle extends StatelessWidget {
   }
 }
 
-/// Ported from RN `PageTitle` (in-content title with optional icon/subtitle).
+/// In-content title with optional icon/subtitle.
 class PageTitle extends StatelessWidget {
   const PageTitle({super.key, required this.title, this.subtitle, this.icon});
   final String title;
@@ -248,42 +309,49 @@ class PageTitle extends StatelessWidget {
   final IconData? icon;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(
-      Spacing.lg,
-      Spacing.lg,
-      Spacing.lg,
-      Spacing.sm,
-    ),
-    child: Row(
-      children: [
-        if (icon != null) ...[
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppColors.taglineBlue,
-              borderRadius: BorderRadius.circular(Radii.md),
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        Spacing.lg,
+        Spacing.lg,
+        Spacing.lg,
+        Spacing.sm,
+      ),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: p.brandTint,
+                borderRadius: BorderRadius.circular(Radii.sm),
+              ),
+              child: Icon(icon, color: p.ink, size: 20),
             ),
-            child: Icon(icon, color: AppColors.pitch, size: 20),
+            const SizedBox(width: Spacing.md),
+          ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: AppText.sectionTitle.copyWith(fontSize: 20)),
+                if (subtitle != null) Text(subtitle!, style: AppText.meta),
+              ],
+            ),
           ),
-          const SizedBox(width: Spacing.md),
         ],
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: AppText.h2),
-              if (subtitle != null) Text(subtitle!, style: AppText.caption),
-            ],
-          ),
-        ),
-      ],
-    ),
-  );
+      ),
+    );
+  }
 }
 
-/// Ported from RN `SectionHeader`.
+/// Section header: sentence-case title (wraps to 2 lines, then ellipsis),
+/// optional live dot, optional action ("See all", brandText). Never
+/// overflows: at 320 px × text 2.0 the action is capped at 45 % width and
+/// ellipsises. [overline] (legacy) renders as a muted line under the title,
+/// never as an all-caps eyebrow.
 class SectionHeader extends StatelessWidget {
   const SectionHeader({
     super.key,
@@ -292,90 +360,98 @@ class SectionHeader extends StatelessWidget {
     this.onActionPress,
     this.actionLabel = 'See all',
     this.showLiveDot = false,
+    this.padding = const EdgeInsets.fromLTRB(
+      Spacing.lg,
+      Spacing.sm,
+      Spacing.sm,
+      Spacing.sm,
+    ),
   });
   final String title;
   final String? overline;
   final VoidCallback? onActionPress;
   final String actionLabel;
   final bool showLiveDot;
+  final EdgeInsetsGeometry padding;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Spacing.lg, 0, Spacing.lg, Spacing.md),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Padding(
+      padding: padding,
+      child: LayoutBuilder(
+        builder: (context, c) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              if (overline != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Row(
+              if (showLiveDot) ...[
+                const LiveDot(size: 8),
+                const SizedBox(width: 8),
+              ],
+              Expanded(
+                child: Semantics(
+                  header: true,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (showLiveDot) ...[
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: const BoxDecoration(
-                            color: AppColors.live,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
                       Text(
-                        overline!.toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textMuted,
-                          letterSpacing: 1.2,
-                        ),
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.sectionTitle,
                       ),
+                      if (overline != null && overline!.trim().isNotEmpty)
+                        Text(
+                          overline!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppText.small,
+                        ),
                     ],
                   ),
                 ),
-              Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.text,
-                  letterSpacing: -0.4,
-                ),
               ),
-            ],
-          ),
-        ),
-        if (onActionPress != null)
-          InkWell(
-            onTap: onActionPress,
-            child: Padding(
-              padding: const EdgeInsets.only(left: 10, top: 4, bottom: 4),
-              child: Row(
-                children: [
-                  Text(
-                    actionLabel,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textSecondary,
+              if (onActionPress != null)
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: c.maxWidth * 0.45),
+                  child: InkWell(
+                    onTap: onActionPress,
+                    borderRadius: BorderRadius.circular(Radii.sm),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 44),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                actionLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppFont.style(
+                                  size: 14,
+                                  weight: FontWeight.w700,
+                                  color: p.brandText,
+                                ),
+                              ),
+                            ),
+                            Icon(
+                              Icons.chevron_right,
+                              size: 18,
+                              color: p.brandText,
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                  const Icon(
-                    Icons.chevron_right,
-                    size: 16,
-                    color: AppColors.textSecondary,
-                  ),
-                ],
-              ),
-            ),
-          ),
-      ],
-    ),
-  );
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 }

@@ -1,247 +1,337 @@
 import 'package:flutter/material.dart';
 
+import '../../core/motion/hero_tags.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/match_transform.dart';
+import '../../core/widgets/cards.dart';
+import '../../core/widgets/live_pill.dart';
 import '../../core/widgets/net_image.dart';
 import '../../core/widgets/pressable.dart';
+import '../../core/widgets/score_text.dart';
+import '../../core/widgets/seam_strip.dart';
+import 'match_parsing.dart';
 
 const double liveCardWidth = 312;
-const double liveCardHeight = 230;
-const double liveCardCompactHeight = 210;
+const double liveCardHeight = 188;
+const double liveCardCompactHeight = 150;
 const double liveCardMargin = 12;
 
-/// Colors that change based on live vs non-live state (RN `useCardColors`).
-class _CardColors {
-  const _CardColors({
-    required this.cardBg,
-    required this.cardBorder,
-    required this.shadow,
-    required this.seriesText,
-    required this.formatBadgeBg,
-    required this.formatText,
-    required this.placeholderBg,
-    required this.placeholderText,
-    required this.teamText,
-    required this.scoreText,
-    required this.vsText,
-    required this.footerBorder,
-    required this.liveBadgeBg,
-    required this.liveBadgeBorder,
-    required this.liveDot,
-    required this.liveText,
-    required this.statusColor,
-    required this.chaseColor,
-    required this.resultColor,
-  });
-  final Color cardBg, cardBorder, shadow, seriesText, formatBadgeBg, formatText, placeholderBg, placeholderText;
-  final Color teamText, scoreText, vsText, footerBorder, liveBadgeBg, liveBadgeBorder, liveDot, liveText;
-  final Color statusColor, chaseColor, resultColor;
-
-  static const live = _CardColors(
-    cardBg: AppColors.pitch,
-    cardBorder: AppColors.pitchDark,
-    shadow: Color(0x470860C4),
-    seriesText: Color(0xBFFFFFFF),
-    formatBadgeBg: Color(0x33FFFFFF),
-    formatText: AppColors.white,
-    placeholderBg: Color(0x33FFFFFF),
-    placeholderText: AppColors.white,
-    teamText: AppColors.white,
-    scoreText: AppColors.white,
-    vsText: Color(0x80FFFFFF),
-    footerBorder: Color(0x33FFFFFF),
-    liveBadgeBg: Color(0x33FFFFFF),
-    liveBadgeBorder: Color(0x4DFFFFFF),
-    liveDot: AppColors.white,
-    liveText: AppColors.white,
-    statusColor: AppColors.white,
-    chaseColor: AppColors.goldLight,
-    resultColor: Color(0xBFFFFFFF),
-  );
-
-  static const normal = _CardColors(
-    cardBg: AppColors.card,
-    cardBorder: AppColors.border,
-    shadow: Color(0x24000000),
-    seriesText: AppColors.textSecondary,
-    formatBadgeBg: AppColors.cardAlt,
-    formatText: AppColors.textSecondary,
-    placeholderBg: AppColors.neutralSurface,
-    placeholderText: AppColors.textMuted,
-    teamText: AppColors.text,
-    scoreText: AppColors.text,
-    vsText: AppColors.textMuted,
-    footerBorder: AppColors.borderSubtle,
-    liveBadgeBg: Color(0x14EF3B3B),
-    liveBadgeBorder: Color(0x33EF3B3B),
-    liveDot: AppColors.live,
-    liveText: AppColors.live,
-    statusColor: AppColors.text,
-    chaseColor: AppColors.pitch,
-    resultColor: AppColors.textSecondary,
-  );
+/// "126/2 (19.0)" -> ("126/2", "19.0"); a score without overs -> (s, null).
+(String runs, String? overs) splitScore(String score) {
+  final m = RegExp(r'^(.*?)\s*\(([\d.]+)\)\s*$').firstMatch(score.trim());
+  if (m == null) return (score.trim(), null);
+  return (m.group(1)!.trim(), m.group(2));
 }
 
-/// Ported from RN `LiveMatchCard`: score card used in the Home carousel
-/// (fixed 312x230) and, with [fullWidth]/[compact], in the Matches list.
-/// Blue when the match is live (with a blinking LIVE badge), white otherwise.
+/// Sentence-case status chip for a match: [LivePill] while in play (key
+/// `common_live_badge`), a quiet word for every other state ("Stumps",
+/// "Upcoming", "Result", "No result", "Abandoned"). Nothing for an empty
+/// status.
+class MatchStatusChip extends StatelessWidget {
+  const MatchStatusChip({super.key, required this.match});
+  final MatchSummary match;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = match.statusLabel;
+    switch (match.phase) {
+      case MatchPhase.live:
+        return const LivePill(key: ValueKey('common_live_badge'), dense: true);
+      case MatchPhase.upcoming:
+        return StatusChip(kind: StatusKind.upcoming, label: label);
+      case MatchPhase.abandoned || MatchPhase.cancelled:
+        return StatusChip(kind: StatusKind.cancelled, label: label);
+      case MatchPhase.unknown when label.isEmpty:
+        return const SizedBox.shrink();
+      default:
+        return StatusChip(kind: StatusKind.completed, label: label);
+    }
+  }
+}
+
+/// One team line used by the card and the flat rows: logo, name, score
+/// (runs in tabular Archivo wdth 72 + overs in muted figures), winner mark.
+class TeamScoreLine extends StatelessWidget {
+  const TeamScoreLine({
+    super.key,
+    required this.name,
+    required this.logo,
+    required this.score,
+    this.scoreStyle,
+    this.logoSize = 28,
+    this.winner,
+    this.logoTag,
+    this.scoreTag,
+    this.heroTags = false,
+  });
+
+  final String name;
+  final String? logo;
+
+  /// null = no score slot (upcoming / not available).
+  final String? score;
+  final TextStyle? scoreStyle;
+  final double logoSize;
+
+  /// true = this side won (bold + check), false = lost (muted), null = n/a.
+  final bool? winner;
+  final String? logoTag, scoreTag;
+  final bool heroTags;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final lost = winner == false;
+    final nameStyle = winner == true
+        ? AppFont.withWeight(AppText.name, FontWeight.w800)
+        : lost
+        ? AppText.name.copyWith(color: p.inkMuted)
+        : AppText.name;
+    final s = score;
+    Widget? scoreWidget;
+    if (s != null) {
+      final yetToBat = s == '—';
+      final (runs, overs) = splitScore(s);
+      final base = scoreStyle ?? AppText.scoreCard;
+      scoreWidget = Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          if (overs != null) ...[
+            Text('$overs ov', style: AppText.figures, maxLines: 1),
+            const SizedBox(width: Spacing.sm),
+          ],
+          ScoreText(
+            runs,
+            style: lost || yetToBat ? base.copyWith(color: p.inkMuted) : base,
+            heroTag: heroTags ? scoreTag : null,
+            semanticsLabel: yetToBat
+                ? 'Yet to bat'
+                : overs == null
+                ? runs
+                : '$runs in $overs overs',
+          ),
+        ],
+      );
+    }
+    return Row(
+      children: [
+        MatchHero(
+          tag: logoTag ?? 'logo:$name',
+          enabled: heroTags && logoTag != null,
+          child: TeamLogo(url: logo, name: name, size: logoSize),
+        ),
+        const SizedBox(width: Spacing.sm + 2),
+        Expanded(
+          child: Text(
+            name.isEmpty ? 'To be announced' : name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: nameStyle,
+          ),
+        ),
+        if (scoreWidget != null) ...[
+          const SizedBox(width: Spacing.sm),
+          // Align fills the flexible slot so the score sits flush right on
+          // wide cards instead of floating mid-row.
+          Flexible(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: scoreWidget,
+              ),
+            ),
+          ),
+        ],
+        // Both sides reserve the mark's width so the score columns align.
+        if (winner != null) ...[
+          const SizedBox(width: Spacing.xs),
+          winner == true
+              ? Icon(
+                  Icons.check,
+                  size: 16,
+                  color: p.positive,
+                  semanticLabel: 'Won',
+                )
+              : const SizedBox(width: 16),
+        ],
+      ],
+    );
+  }
+}
+
+/// Score card. Live/paused: surface + 3 dp brand left edge, radius 12 (the
+/// raised card). Anything else: flat surface with a hairline.
+///
+/// Layout: meta line (status chip, series, format), one row per team, the
+/// current over as a [SeamStrip] when [overBalls] (or the item's own
+/// `currentOver`) has balls, then the status / chase line. Upcoming
+/// matches show no score; a side yet to bat shows "—".
+///
+/// [heroTags]: wrap logos and scores in [MatchHero]s for the card → Match
+/// Centre moment. Only enable it where the match appears once on screen.
+/// The legacy fixed-size rail mode (neither [fullWidth] nor [compact]) is
+/// kept for callers that still use it.
 class LiveMatchCard extends StatelessWidget {
-  const LiveMatchCard({super.key, required this.match, required this.onTap, this.fullWidth = false, this.compact = false});
+  const LiveMatchCard({
+    super.key,
+    required this.match,
+    required this.onTap,
+    this.fullWidth = false,
+    this.compact = false,
+    this.heroTags = false,
+    this.showSeries = true,
+    this.overBalls,
+    this.overNumber,
+  });
 
   final MatchSummary match;
   final VoidCallback? onTap;
   final bool fullWidth;
   final bool compact;
+  final bool heroTags;
+
+  /// False under a series group header (the Live list).
+  final bool showSeries;
+
+  /// Current-over ball labels ("0", "4", "WK", "1NB"...). Null = use the
+  /// item's own `currentOver` when present.
+  final List<String>? overBalls;
+  final int? overNumber;
 
   @override
   Widget build(BuildContext context) {
-    final isLive = match.isLive;
-    final c = isLive ? _CardColors.live : _CardColors.normal;
-    final statusText = match.chaseSummaryLine ?? match.status;
+    final p = context.palette;
+    final raised = match.isInProgress;
+    final line = match.statusLine;
     final isChase = match.chaseSummaryLine != null;
+    final id = match.id;
+    final win = match.winnerSide;
+    final balls = overBalls ?? match.currentOverBalls;
+    final overNo = overNumber ?? match.currentOverNumber;
 
-    final header = Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(children: [
+    final meta = Row(
+      children: [
+        MatchStatusChip(match: match),
+        const SizedBox(width: Spacing.sm),
         Expanded(
-          child: Text(match.series.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.3, color: c.seriesText)),
+          child: showSeries
+              ? Text(
+                  match.series,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.small.copyWith(color: p.inkMuted),
+                )
+              : const SizedBox.shrink(),
         ),
-        if (match.format != null)
-          Container(
-            margin: const EdgeInsets.only(left: Spacing.sm),
-            padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 2),
-            decoration: BoxDecoration(color: c.formatBadgeBg, borderRadius: BorderRadius.circular(Radii.sm)),
-            child: Text(match.format!, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.3, color: c.formatText)),
-          ),
-      ]),
+        if (match.format != null) ...[
+          const SizedBox(width: Spacing.sm),
+          FormatChip(match.format!),
+        ],
+      ],
     );
 
-    Widget team(String name, String? logo, String? score) => Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Spacing.xs),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Padding(
-                padding: const EdgeInsets.only(bottom: 2),
-                child: logo != null
-                    ? NetImage(url: logo, size: 34, radius: 0, background: Colors.transparent, fallbackLetter: name)
-                    : Container(
-                        width: 34,
-                        height: 34,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(color: c.placeholderBg, shape: BoxShape.circle),
-                        child: Text(name.isEmpty ? '?' : name[0],
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: c.placeholderText)),
-                      ),
-              ),
-              const SizedBox(height: Spacing.xs),
-              Text(name.isEmpty ? '-' : name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 0.2, color: c.teamText)),
-              const SizedBox(height: Spacing.xs + 2),
-              Text(score ?? '—',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: c.scoreText,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  )),
-            ]),
-          ),
-        );
-
-    final scoreRow = Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-      team(match.team1, match.team1Logo, match.team1Score),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Spacing.xs),
-        child: Text('vs', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: c.vsText)),
+    Widget team(int side) => Padding(
+      padding: const EdgeInsets.only(top: Spacing.sm + 2),
+      child: TeamScoreLine(
+        name: side == 1 ? match.team1 : match.team2,
+        logo: side == 1 ? match.team1Logo : match.team2Logo,
+        score: match.displayScore(side),
+        winner: win == null ? null : win == side,
+        heroTags: heroTags,
+        logoTag: side == 1
+            ? MatchHeroTags.team1Logo(id)
+            : MatchHeroTags.team2Logo(id),
+        scoreTag: side == 1
+            ? MatchHeroTags.team1Score(id)
+            : MatchHeroTags.team2Score(id),
       ),
-      team(match.team2, match.team2Logo, match.team2Score),
-    ]);
+    );
 
-    final footer = Container(
-      margin: const EdgeInsets.only(top: Spacing.xl),
-      padding: const EdgeInsets.only(top: Spacing.sm),
-      decoration: BoxDecoration(border: Border(top: BorderSide(color: c.footerBorder))),
-      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        if (isLive) ...[
-          Container(
-            key: const ValueKey('common_live_badge'),
-            padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 3),
-            decoration: BoxDecoration(
-              color: c.liveBadgeBg,
-              borderRadius: BorderRadius.circular(Radii.md),
-              border: Border.all(color: c.liveBadgeBorder),
+    final teams = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [team(1), team(2)],
+    );
+
+    final seam = balls.isEmpty || !raised
+        ? null
+        : Padding(
+            padding: const EdgeInsets.only(top: Spacing.sm),
+            child: SeamStrip.labels(
+              balls,
+              key: const ValueKey('common_live_seam'),
+              overLabel: overNo == null ? 'This over' : 'Over $overNo',
             ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              BlinkingDot(color: c.liveDot),
-              const SizedBox(width: 5),
-              Text('LIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: c.liveText)),
-            ]),
-          ),
-          const SizedBox(width: Spacing.sm),
-        ],
-        if (statusText.isNotEmpty)
-          Expanded(
+          );
+
+    final status = line == null
+        ? null
+        : Padding(
+            padding: const EdgeInsets.only(top: Spacing.sm + 2),
             child: Text(
-              statusText,
+              line,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: isChase ? FontWeight.w700 : FontWeight.w600,
-                color: isChase ? c.chaseColor : (isLive ? c.statusColor : c.resultColor),
-              ),
+              style: isChase
+                  ? AppFont.withWeight(
+                      AppText.meta.copyWith(color: p.ink),
+                      FontWeight.w700,
+                    )
+                  : AppText.meta.copyWith(
+                      color: match.isFinished ? p.ink : p.inkMuted,
+                    ),
             ),
-          ),
-      ]),
-    );
+          );
 
-    // Fixed card height (carousel): the score area flexes and scales down
-    // instead of overflowing on large text scales. List (compact/fullWidth):
-    // natural height with a floor.
+    // Fixed-height rail card: the team block scales down instead of
+    // overflowing at large text sizes. List cards: natural height.
     final fixedHeight = !fullWidth && !compact;
     final body = fixedHeight
-        ? Column(children: [
-            header,
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: Spacing.sm),
-                child: FittedBox(fit: BoxFit.scaleDown, child: SizedBox(width: liveCardWidth - 34, child: scoreRow)),
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              meta,
+              Expanded(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(width: liveCardWidth - 30, child: teams),
+                ),
               ),
-            ),
-            footer,
-          ])
-        : Column(mainAxisSize: MainAxisSize.min, children: [
-            header,
-            Padding(padding: const EdgeInsets.symmetric(vertical: Spacing.sm), child: scoreRow),
-            footer,
-          ]);
+              ?status,
+            ],
+          )
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [meta, teams, ?seam, ?status],
+          );
 
+    final radius = BorderRadius.circular(Radii.card);
+    final label = StringBuffer('${match.team1} vs ${match.team2}');
+    if (match.statusLabel.isNotEmpty) label.write(', ${match.statusLabel}');
     return Semantics(
       button: true,
-      label: '${match.team1} vs ${match.team2}${isLive ? ', live' : ''}',
+      label: label.toString(),
       child: Pressable(
         onTap: onTap,
+        borderRadius: radius,
         child: Container(
           width: fullWidth ? double.infinity : liveCardWidth,
           height: fixedHeight ? liveCardHeight : null,
-          constraints: compact ? const BoxConstraints(minHeight: liveCardCompactHeight) : null,
-          margin: fullWidth ? EdgeInsets.zero : const EdgeInsets.symmetric(horizontal: liveCardMargin / 2),
-          padding: const EdgeInsets.all(Spacing.lg),
+          margin: fullWidth
+              ? EdgeInsets.zero
+              : const EdgeInsets.symmetric(horizontal: liveCardMargin / 2),
+          padding: EdgeInsets.fromLTRB(raised ? 13 : 14, 12, 14, 14),
           decoration: BoxDecoration(
-            color: c.cardBg,
-            borderRadius: BorderRadius.circular(Radii.md),
-            border: Border.all(color: c.cardBorder),
-            boxShadow: [BoxShadow(color: c.shadow, blurRadius: isLive ? 16 : 14, offset: const Offset(0, 6))],
+            color: p.surface,
+            borderRadius: radius,
+            border: raised
+                ? Border(left: BorderSide(color: p.brand, width: 3))
+                : Border.all(color: p.hairline),
           ),
           child: body,
         ),
@@ -250,35 +340,12 @@ class LiveMatchCard extends StatelessWidget {
   }
 }
 
-/// 6px dot pulsing 1 → 0.35 opacity (RN blink loop). Uses a ticker, so it
-/// stops automatically while its tab/route is offstage (TickerMode).
-class BlinkingDot extends StatefulWidget {
+/// Legacy name: now a [LiveDot] driven by the shared pulse.
+class BlinkingDot extends StatelessWidget {
   const BlinkingDot({super.key, required this.color, this.size = 6});
   final Color color;
   final double size;
 
   @override
-  State<BlinkingDot> createState() => _BlinkingDotState();
-}
-
-class _BlinkingDotState extends State<BlinkingDot> with SingleTickerProviderStateMixin {
-  late final AnimationController _c =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 600), lowerBound: 0.35, upperBound: 1)
-        ..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => FadeTransition(
-        opacity: _c,
-        child: Container(
-          width: widget.size,
-          height: widget.size,
-          decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle),
-        ),
-      );
+  Widget build(BuildContext context) => LiveDot(size: size, color: color);
 }

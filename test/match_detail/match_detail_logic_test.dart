@@ -152,7 +152,12 @@ void main() {
   group('MatchDetailVM', () {
     test('fixture: live Test match', () {
       final vm = MatchDetailVM.fromJson(liveDetailData());
-      expect(vm.isLive, isTrue); // isLive:true, status STUMPS, no result
+      expect(vm.isLive, isTrue); // status STUMPS = in play (a break), no result
+      expect(vm.matchStatus.phase.name, 'interrupted');
+      expect(vm.matchStatus.label, 'Stumps');
+      expect(vm.format, 'TEST');
+      expect(vm.t1.code, 'RSA');
+      expect(vm.t1.key, 'rsa');
       expect(vm.isMatchWon, isFalse);
       expect(vm.metaLine, 'TEST · The Wanderers Stadium, Johannesburg, South Africa');
       expect(vm.toss, 'Bangladesh opt to bat');
@@ -177,14 +182,17 @@ void main() {
       expect(vm.resultMessage, 'South Africa won by 5 wickets');
     });
 
-    test('deriveDetailIsLive rules', () {
+    test('deriveDetailIsLive comes from status only (isLive is ignored)', () {
       expect(deriveDetailIsLive({'status': 'LIVE'}), isTrue);
       expect(deriveDetailIsLive({'status': 'In LIVE play'}), isTrue);
-      expect(deriveDetailIsLive({'status': 'LIVE', 'isLive': false}), isFalse);
+      expect(deriveDetailIsLive({'status': 'STUMPS'}), isTrue);
+      expect(deriveDetailIsLive({'status': 'LIVE', 'isLive': false}), isTrue);
       expect(deriveDetailIsLive({'status': 'COMPLETED', 'isLive': true}), isFalse);
       expect(deriveDetailIsLive({'status': 'LIVE', 'result': {'message': 'X won'}}), isFalse);
-      expect(deriveDetailIsLive({'status': 'NOT_STARTED'}), isFalse);
+      expect(deriveDetailIsLive({'status': 'NOT_STARTED', 'isLive': true}), isFalse);
       expect(deriveDetailIsLive({'status': 'abandoned', 'isLive': true}), isFalse);
+      expect(deriveIsMatchWon({'status': 'COMPLETED'}), isTrue);
+      expect(deriveIsMatchWon({'status': 'ABANDONED'}), isFalse);
     });
 
     test('malformed detail never throws', () {
@@ -316,8 +324,8 @@ void main() {
       for (var i = 1; i < sorted.length; i++) {
         expect(sorted[i - 1].timestamp >= sorted[i].timestamp, isTrue);
       }
-      expect(filterCommentary(merged, filter: CommentaryFilter.wicket).single.value, 'WK');
-      expect(filterCommentary(merged, filter: CommentaryFilter.six), isEmpty);
+      expect(filterCommentary(merged, filter: CommentaryFilter.wickets).single.value, 'WK');
+      expect(filterCommentary(merged, filter: CommentaryFilter.boundaries), isEmpty);
       expect(filterCommentary(merged, team: 't2_1'), isEmpty);
       expect(uniqueInningsKeys(merged), ['t1_1']);
       final page = CommentaryPage.fromJson(J.map(fixture('match_commentary')['data']));

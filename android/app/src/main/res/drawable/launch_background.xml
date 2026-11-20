@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- CrickBex native launch screen (pre-Android 12): brand blue + centered splash-icon,
-     same as the RN expo-splash-screen config (backgroundColor #0B5CD4, imageWidth 200). -->
+<!-- Cric Ticker native launch screen (pre-Android 12): splash ink #17130F with the
+     icon mark centred. Android 12+ uses the SplashScreen API (values-v31 styles);
+     the Flutter intro then starts from the same frame. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@color/splash_background" />
+    <item>
+        <color android:color="#FF17130F" />
+    </item>
     <item>
         <bitmap
             android:gravity="center"
-            android:src="@drawable/splash_logo" />
+            android:filter="true"
+            android:src="@drawable/splash_icon" />
     </item>
 </layer-list>

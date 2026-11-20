@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crickbex/core/api/api_client.dart';
 import 'package:crickbex/core/api/json.dart';
 import 'package:crickbex/core/services/cricket_services.dart';
 import 'package:crickbex/core/theme/app_theme.dart';
@@ -11,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import '../support/sbx1_server.dart';
 
 String fixtureText(String name) => File('test/fixtures/$name.json').readAsStringSync();
 JsonMap fixtureJson(String name) => J.map(jsonDecode(fixtureText(name)));
@@ -55,9 +55,10 @@ class FakeApi {
   });
 
   void install() {
-    final api = ApiClient(client: client, baseUrl: 'http://test', apiKey: 'k', retryDelays: const []);
+    final api = testClient(client, baseUrl: 'http://test', retryDelays: const []);
     MatchService.instance = MatchService(api);
     RankingService.instance = RankingService(api);
+    PlayerService.instance = PlayerService(api);
   }
 
   static Responder ok(String text) => (_) => http.Response.bytes(utf8.encode(text), 200, headers: {'content-type': 'application/json'});

@@ -5,11 +5,13 @@ typedef JsonMap = Map<String, dynamic>;
 class J {
   J._();
 
-  static JsonMap map(dynamic v) => v is Map ? v.cast<String, dynamic>() : <String, dynamic>{};
+  static JsonMap map(dynamic v) =>
+      v is Map ? v.cast<String, dynamic>() : <String, dynamic>{};
 
   static List<dynamic> list(dynamic v) => v is List ? v : const [];
 
-  static List<JsonMap> maps(dynamic v) => list(v).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+  static List<JsonMap> maps(dynamic v) =>
+      list(v).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
 
   static String str(dynamic v, [String fallback = '']) {
     if (v == null) return fallback;
@@ -38,7 +40,9 @@ class J {
 
   /// Finite double or null ("NaN"/"Infinity" are treated as missing).
   static double? number(dynamic v) {
-    final d = v is num ? v.toDouble() : (v is String ? double.tryParse(v.trim()) : null);
+    final d = v is num
+        ? v.toDouble()
+        : (v is String ? double.tryParse(v.trim()) : null);
     return d != null && d.isFinite ? d : null;
   }
 

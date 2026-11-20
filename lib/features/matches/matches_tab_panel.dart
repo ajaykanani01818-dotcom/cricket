@@ -2,27 +2,25 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/match_transform.dart';
-import '../../core/widgets/shimmer_box.dart';
+import '../../core/widgets/skeletons.dart';
 import '../ads/ads.dart';
-import '../common/inline_states.dart';
-import '../common/live_match_card.dart';
-import '../common/upcoming_match_card.dart';
+import '../common/match_time.dart';
+import 'feature_states.dart';
+import 'match_filters.dart';
+import 'match_row.dart';
 import 'matches_controller.dart';
 
-/// RN adsConfig default `matches_list.interval`. The Flutter ads interface
-/// doesn't expose placement config; ListNativeAd itself decides whether to
-/// render (it collapses to nothing when ads are off / no-ads is active).
+/// RN adsConfig default `matches_list.interval`. ListNativeAd collapses to
+/// zero height when ads are off, so the slot never leaves a gap.
 const matchesNativeAdInterval = 3;
 
-/// One row of the flat list: series header band, match card or inline ad.
+/// Max content width of the list on tablets and desktop.
+const kMatchesMaxWidth = 720.0;
+
+/// One row inside a series section: a match or an inline ad slot.
 sealed class MatchListItem {
   const MatchListItem(this.key);
   final String key;
-}
-
-class SeriesHeaderItem extends MatchListItem {
-  const SeriesHeaderItem(super.key, this.seriesName);
-  final String seriesName;
 }
 
 class MatchItem extends MatchListItem {
@@ -35,35 +33,48 @@ class NativeAdItem extends MatchListItem {
   const NativeAdItem(super.key);
 }
 
-/// RN `buildListData`: group consecutive matches by series (preserving order)
-/// and interleave a native ad slot every [nativeInterval] matches.
-List<MatchListItem> buildMatchListData(MatchesTab tab, List<MatchSummary> list,
-    {bool showNativeSlots = true, int nativeInterval = matchesNativeAdInterval}) {
-  final items = <MatchListItem>[];
-  String? current;
-  var idx = 0;
-  for (final m in list) {
-    final series = m.series.trim().isEmpty ? 'Other matches' : m.series.trim();
-    if (series != current) {
-      current = series;
-      items.add(SeriesHeaderItem('header-${tab.name}-$series-$idx', series));
-    }
-    if (showNativeSlots && nativeInterval > 0 && idx > 0 && idx % nativeInterval == 0) {
-      items.add(NativeAdItem('native-${tab.name}-$idx'));
-    }
-    items.add(MatchItem('match-${tab.name}-${m.id.isEmpty ? 'i$idx' : m.id}-$idx', m, idx));
-    idx++;
-  }
-  return items;
+/// A series section with a sticky header.
+class MatchSection {
+  MatchSection(this.key, this.title, this.items);
+  final String key;
+  final String title;
+  final List<MatchListItem> items;
+  int get matchCount => items.whereType<MatchItem>().length;
 }
 
-/// Ported from RN `MatchesTabPanel` (one page of the Matches pager).
+/// Groups [list] by series (see [groupBySeries]) and interleaves a native ad
+/// slot every [nativeInterval] matches (counted across the whole list).
+List<MatchSection> buildMatchSections(
+  MatchesTab tab,
+  List<MatchSummary> list, {
+  bool showNativeSlots = true,
+  int nativeInterval = matchesNativeAdInterval,
+}) {
+  final out = <MatchSection>[];
+  var idx = 0;
+  for (final g in groupBySeries(list)) {
+    final items = <MatchListItem>[];
+    for (final m in g.matches) {
+      if (showNativeSlots && nativeInterval > 0 && idx > 0 && idx % nativeInterval == 0) {
+        items.add(NativeAdItem('native-${tab.name}-$idx'));
+      }
+      items.add(MatchItem('match-${tab.name}-${m.id.isEmpty ? 'i$idx' : m.id}-$idx', m, idx));
+      idx++;
+    }
+    out.add(MatchSection('header-${tab.name}-${g.key}', g.title, items));
+  }
+  return out;
+}
+
+/// One page of the Matches pager (Live, Upcoming or Results).
 class MatchesTabPanel extends StatefulWidget {
-  const MatchesTabPanel({super.key, required this.tab, required this.controller, required this.onMatchTap, this.bottomPadding = 0});
+  const MatchesTabPanel({super.key, required this.tab, required this.controller, required this.onMatchTap, this.onShowTab});
   final MatchesTab tab;
   final MatchesController controller;
   final ValueChanged<MatchSummary> onMatchTap;
-  final double bottomPadding;
+
+  /// Empty Live → "See upcoming".
+  final ValueChanged<MatchesTab>? onShowTab;
 
   @override
   State<MatchesTabPanel> createState() => _MatchesTabPanelState();
@@ -72,14 +83,20 @@ class MatchesTabPanel extends StatefulWidget {
 class _MatchesTabPanelState extends State<MatchesTabPanel> with AutomaticKeepAliveClientMixin {
   final _scroll = ScrollController();
   List<MatchSummary>? _builtFor;
-  List<MatchListItem> _items = const [];
-  Map<String, int> _indexByKey = const {};
+  MatchFilters? _builtFilters;
+  List<MatchSummary> _visible = const [];
+  List<MatchSection> _sections = const [];
 
   @override
   bool get wantKeepAlive => true;
 
   MatchesController get _c => widget.controller;
   bool get _isCompleted => widget.tab == MatchesTab.completed;
+  bool get _applyDay => widget.tab != MatchesTab.live;
+
+  /// Filters that hide loaded rows (auto paging is off while they apply, so
+  /// a filter change never sends a request).
+  bool get _filtering => _c.filters.hasContentFilter || (_applyDay && _c.filters.day != null);
 
   @override
   void dispose() {
@@ -89,217 +106,336 @@ class _MatchesTabPanelState extends State<MatchesTabPanel> with AutomaticKeepAli
 
   /// RN onEndReachedThreshold 0.4 (fraction of the viewport).
   void _maybeLoadMore(ScrollMetrics m) {
-    // Auto-trigger only; after a failed page the footer's Try Again retries
-    // (otherwise a short list + failing server would retry in a loop).
-    if (!_isCompleted || _c.loadMoreError != null) return;
+    // After a failed page only the footer retries (no retry loop), and while
+    // filters apply paging is explicit ("Load more results").
+    if (!_isCompleted || _c.loadMoreError != null || _filtering) return;
     if (m.extentAfter < m.viewportDimension * 0.4) _c.loadMoreCompleted();
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return ListenableBuilder(listenable: _c, builder: (context, _) => _body());
+    return ListenableBuilder(listenable: _c, builder: (context, _) => _body(context));
   }
 
-  Widget _body() {
+  VoidCallback get _retry => switch (widget.tab) {
+    MatchesTab.upcoming => _c.fetchUpcoming,
+    MatchesTab.live => _c.fetchLive,
+    MatchesTab.completed => _c.fetchCompleted,
+  };
+
+  Widget _refreshable(Widget child) => RefreshIndicator(
+    key: ValueKey('matches_refresh_${widget.tab.name}'),
+    color: context.palette.brandText,
+    onRefresh: _c.refresh,
+    child: child,
+  );
+
+  Widget _messageList(Widget message, {bool withFooter = false}) => _refreshable(
+    ListView(
+      key: PageStorageKey('matches_message_${widget.tab.name}'),
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [message, if (withFooter) _footer()],
+    ),
+  );
+
+  Widget _body(BuildContext context) {
     final d = _c[widget.tab];
-    final retry = switch (widget.tab) {
-      MatchesTab.upcoming => _c.fetchUpcoming,
-      MatchesTab.live => _c.fetchLive,
-      MatchesTab.completed => _c.fetchCompleted,
-    };
+    final tab = widget.tab.name;
 
-    if (d.loading && d.matches.isEmpty) return const MatchesShimmer();
+    if (d.loading && d.matches.isEmpty && d.error == null) return const MatchesShimmer();
 
-    Widget scrollable(Widget child) => RefreshIndicator(
-          key: ValueKey('matches_refresh_${widget.tab.name}'),
-          color: AppColors.pitch,
-          onRefresh: _c.refresh,
-          child: child,
-        );
-
-    if (d.error != null || d.matches.isEmpty) {
-      // Still pull-to-refreshable.
-      return scrollable(ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(Spacing.lg, Spacing.xxl, Spacing.lg, 0),
-        children: [
-          if (d.error != null)
-            InlineMessageCard(
-              key: ValueKey('matches_error_${widget.tab.name}'),
-              text: d.error!,
-              isError: true,
-              actionLabel: 'Try Again',
-              actionKey: ValueKey('matches_retry_${widget.tab.name}'),
-              onAction: retry,
-              padding: const EdgeInsets.symmetric(vertical: 28, horizontal: Spacing.xxl),
-            )
-          else
-            InlineMessageCard(
-              key: ValueKey('matches_empty_${widget.tab.name}'),
-              text: widget.tab == MatchesTab.live ? 'No live matches right now' : 'No matches in this section',
-              padding: const EdgeInsets.symmetric(vertical: 28, horizontal: Spacing.xxl),
-            ),
-        ],
-      ));
+    if (d.error != null && d.matches.isEmpty) {
+      return _messageList(
+        KeyedSubtree(
+          key: ValueKey('matches_error_$tab'),
+          child: ErrorMessage(
+            title: switch (widget.tab) {
+              MatchesTab.live => "Live matches didn't load",
+              MatchesTab.upcoming => "Upcoming matches didn't load",
+              MatchesTab.completed => "Results didn't load",
+            },
+            reason: d.error!,
+            onRetry: _retry,
+            retryKey: ValueKey('matches_retry_$tab'),
+          ),
+        ),
+      );
     }
 
-    if (!identical(_builtFor, d.matches)) {
+    if (d.matches.isEmpty) return _messageList(_emptyMessage());
+
+    if (!identical(_builtFor, d.matches) || _builtFilters != _c.filters) {
       _builtFor = d.matches;
-      _items = buildMatchListData(widget.tab, d.matches);
-      _indexByKey = {for (var i = 0; i < _items.length; i++) _items[i].key: i};
+      _builtFilters = _c.filters;
+      _visible = _c.filters.apply(d.matches, applyDay: _applyDay);
+      _sections = buildMatchSections(widget.tab, _visible);
     }
-    final items = _items;
-    final r = Responsive.of(context);
-    final footer = _isCompleted ? 1 : 0;
 
-    if (_isCompleted) {
-      // RN FlatList fires onEndReached on layout when the first page doesn't
-      // fill the viewport; mirror that (the controller ignores duplicates).
+    if (_visible.isEmpty) return _messageList(_filteredEmpty(), withFooter: _isCompleted);
+
+    if (_isCompleted && !_filtering) {
+      // A first page that does not fill the viewport has no scroll to fire
+      // paging; check once after layout (the controller ignores duplicates).
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _scroll.hasClients) _maybeLoadMore(_scroll.position);
       });
     }
 
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: r.contentMaxWidth),
-        child: NotificationListener<ScrollNotification>(
+    return LayoutBuilder(
+      builder: (context, box) {
+        final side = box.maxWidth > kMatchesMaxWidth ? (box.maxWidth - kMatchesMaxWidth) / 2 : 0.0;
+        return NotificationListener<ScrollNotification>(
           onNotification: (n) {
             if (n.metrics.axis == Axis.vertical) _maybeLoadMore(n.metrics);
             return false;
           },
-          child: scrollable(ListView.builder(
-            key: PageStorageKey('matches_list_${widget.tab.name}'),
-            controller: _scroll,
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: EdgeInsets.fromLTRB(r.horizontalPadding, r.isSmall ? 12 : 14, r.horizontalPadding, widget.bottomPadding),
-            itemCount: items.length + footer,
-            findChildIndexCallback: (key) {
-              final k = key is ValueKey<String> ? key.value : null;
-              return k == null ? null : _indexByKey[k];
-            },
-            itemBuilder: (context, i) {
-              if (i >= items.length) return _footer();
-              final it = items[i];
-              return switch (it) {
-                SeriesHeaderItem(:final seriesName) => Padding(
-                    key: ValueKey(it.key),
-                    padding: const EdgeInsets.fromLTRB(Spacing.xs, 18, Spacing.xs, Spacing.sm),
-                    child: Text(seriesName.toUpperCase(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textMuted, letterSpacing: 1.2)),
+          child: _refreshable(
+            CustomScrollView(
+              key: PageStorageKey('matches_list_$tab'),
+              controller: _scroll,
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(side, 0, side, Spacing.lg),
+                  sliver: SliverMainAxisGroup(
+                    slivers: [
+                      for (final s in _sections) _section(context, s),
+                      if (_isCompleted) SliverToBoxAdapter(child: _footer()),
+                    ],
                   ),
-                NativeAdItem() => Padding(
-                    key: ValueKey(it.key),
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: const ListNativeAd(placement: 'matches_list'),
-                  ),
-                MatchItem(:final match) => Padding(
-                    key: ValueKey(it.key),
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: match.isLive
-                        ? LiveMatchCard(match: match, onTap: () => widget.onMatchTap(match), fullWidth: true, compact: true)
-                        : UpcomingMatchCard(
-                            match: match,
-                            onTap: () => widget.onMatchTap(match),
-                            variant: _isCompleted ? UpcomingCardVariant.completed : UpcomingCardVariant.upcoming,
-                            matchesListFrame: true,
-                          ),
-                  ),
-              };
-            },
-          )),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _section(BuildContext context, MatchSection s) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return SliverMainAxisGroup(
+      key: ValueKey(s.key),
+      slivers: [
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: SeriesHeaderDelegate(title: s.title, count: s.matchCount, scaler: scaler),
         ),
+        SliverList.builder(
+          itemCount: s.items.length,
+          itemBuilder: (context, i) {
+            final it = s.items[i];
+            return switch (it) {
+              NativeAdItem() => KeyedSubtree(
+                key: ValueKey(it.key),
+                child: const ListNativeAd(placement: 'matches_list'),
+              ),
+              MatchItem(:final match) => MatchRow(
+                key: ValueKey(it.key),
+                data: MatchRowData.fromSummary(match),
+                onTap: match.id.isEmpty ? null : () => widget.onMatchTap(match),
+              ),
+            };
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _emptyMessage() {
+    final tab = widget.tab.name;
+    return KeyedSubtree(
+      key: ValueKey('matches_empty_$tab'),
+      child: switch (widget.tab) {
+        MatchesTab.live => StateMessage(
+          icon: Icons.sensors_off_outlined,
+          title: 'No live matches right now',
+          body: 'See what starts next in Upcoming.',
+          actionLabel: 'See upcoming',
+          actionKey: const ValueKey('matches_empty_action_live'),
+          onAction: widget.onShowTab == null ? null : () => widget.onShowTab!(MatchesTab.upcoming),
+        ),
+        MatchesTab.upcoming => StateMessage(
+          icon: Icons.event_outlined,
+          title: 'No upcoming matches listed',
+          body: 'New fixtures show up here once they are scheduled. Pull down to check again.',
+          actionLabel: 'Refresh',
+          actionKey: const ValueKey('matches_empty_action_upcoming'),
+          onAction: _c.refresh,
+        ),
+        MatchesTab.completed => StateMessage(
+          icon: Icons.emoji_events_outlined,
+          title: 'No results yet',
+          body: 'Finished matches show up here. Pull down to check again.',
+          actionLabel: 'Refresh',
+          actionKey: const ValueKey('matches_empty_action_completed'),
+          onAction: _c.refresh,
+        ),
+      },
+    );
+  }
+
+  Widget _filteredEmpty() {
+    final f = _c.filters;
+    final what = [if (f.women) "women's", if (f.format != FormatFilter.all) f.format.label].join(' ');
+    final noun = switch (widget.tab) {
+      MatchesTab.live => 'live matches',
+      MatchesTab.upcoming => 'upcoming matches',
+      MatchesTab.completed => 'results',
+    };
+    final when = _applyDay && f.day != null ? ' ${_dayPhrase(f.day!)}' : '';
+    final more = _isCompleted && _c.completedHasMore;
+    return KeyedSubtree(
+      key: ValueKey('matches_filtered_empty_${widget.tab.name}'),
+      child: StateMessage(
+        icon: Icons.filter_alt_off_outlined,
+        title: 'No ${what.isEmpty ? '' : '$what '}$noun$when',
+        body: more
+            ? 'Filters apply to the results loaded so far. Load more results below or clear the filters.'
+            : 'Try another date or format, or clear the filters.',
+        actionLabel: 'Clear filters',
+        actionKey: const ValueKey('matches_clear_filters'),
+        onAction: () => _c.setFilters(const MatchFilters()),
       ),
     );
   }
 
+  String _dayPhrase(DateTime day) {
+    final l = dayLabel(day, MinuteClock.now());
+    return switch (l) {
+      'Today' => 'today',
+      'Yesterday' => 'yesterday',
+      'Tomorrow' => 'tomorrow',
+      _ => 'on $l',
+    };
+  }
+
   Widget _footer() {
+    final p = context.palette;
     final Widget child;
     if (_c.completedLoadingMore) {
-      child = const Row(key: ValueKey('matches_loading_more'), mainAxisAlignment: MainAxisAlignment.center, children: [
-        SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.pitch)),
-        SizedBox(width: Spacing.sm),
-        Text('Loading more…', style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-      ]);
-    } else if (_c.loadMoreError != null) {
-      child = Column(key: const ValueKey('matches_load_more_error'), mainAxisSize: MainAxisSize.min, children: [
-        Text(_c.loadMoreError!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: AppColors.error)),
-        TextButton(
-          key: const ValueKey('matches_load_more_retry'),
-          onPressed: _c.loadMoreCompleted,
-          child: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.w700, color: AppColors.pitch)),
-        ),
-      ]);
-    } else if (!_c.completedHasMore && _c[MatchesTab.completed].matches.isNotEmpty) {
-      child = const Center(
-        key: ValueKey('matches_no_more'),
-        child: Text('No more matches', style: TextStyle(fontSize: 11, color: AppColors.textMuted, letterSpacing: 0.3)),
+      child = Row(
+        key: const ValueKey('matches_loading_more'),
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: p.brandText)),
+          const SizedBox(width: Spacing.sm),
+          Flexible(child: Text('Loading more results', style: AppText.meta)),
+        ],
       );
+    } else if (_c.loadMoreError != null) {
+      child = Column(
+        key: const ValueKey('matches_load_more_error'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "More results didn't load. ${_c.loadMoreError!}",
+            textAlign: TextAlign.center,
+            style: AppText.meta.copyWith(color: p.negative),
+          ),
+          TextButton(key: const ValueKey('matches_load_more_retry'), onPressed: _c.loadMoreCompleted, child: const Text('Try again')),
+        ],
+      );
+    } else if (_c.completedHasMore && _filtering && _c[MatchesTab.completed].matches.isNotEmpty) {
+      child = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Filters apply to the ${_c[MatchesTab.completed].matches.length} results loaded so far.',
+            textAlign: TextAlign.center,
+            style: AppText.meta,
+          ),
+          TextButton(
+            key: const ValueKey('matches_load_more_button'),
+            onPressed: _c.loadMoreCompleted,
+            child: const Text('Load more results'),
+          ),
+        ],
+      );
+    } else if (!_c.completedHasMore && _c[MatchesTab.completed].matches.isNotEmpty) {
+      child = Text("That's every result we have", key: const ValueKey('matches_no_more'), style: AppText.meta);
     } else {
       child = const SizedBox.shrink();
     }
     return Container(
       key: const ValueKey('matches_footer'),
       constraints: const BoxConstraints(minHeight: 48),
-      padding: const EdgeInsets.symmetric(vertical: 14),
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: Spacing.lg),
       alignment: Alignment.center,
       child: child,
     );
   }
 }
 
-/// Ported from RN `MatchesShimmer`: series header bands + match card placeholders.
+/// Sticky series header: series name and match count on the canvas band.
+class SeriesHeaderDelegate extends SliverPersistentHeaderDelegate {
+  SeriesHeaderDelegate({required this.title, required this.count, required this.scaler});
+  final String title;
+  final int count;
+  final TextScaler scaler;
+
+  double get _extent => scaler.scale(14) * 1.3 + 22;
+
+  @override
+  double get minExtent => _extent;
+  @override
+  double get maxExtent => _extent;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final p = context.palette;
+    return Semantics(
+      header: true,
+      label: '$title, $count ${count == 1 ? 'match' : 'matches'}',
+      excludeSemantics: true,
+      child: Container(
+        height: _extent,
+        padding: const EdgeInsets.symmetric(horizontal: Spacing.lg),
+        decoration: BoxDecoration(
+          color: p.canvas,
+          border: Border(bottom: BorderSide(color: p.hairline)),
+        ),
+        alignment: Alignment.centerLeft,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppFont.style(size: 14, weight: FontWeight.w700, color: p.ink, height: 1.3),
+              ),
+            ),
+            const SizedBox(width: Spacing.sm),
+            Text(
+              '$count',
+              style: AppFont.style(size: 13, weight: FontWeight.w600, color: p.inkMuted, tabularFigures: true, height: 1.3),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(SeriesHeaderDelegate old) => old.title != title || old.count != count || old.scaler != scaler;
+}
+
+/// First-load skeleton: header bands and flat rows (mirrors the list).
 class MatchesShimmer extends StatelessWidget {
   const MatchesShimmer({super.key});
 
   @override
   Widget build(BuildContext context) {
-    Widget card() => Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: AppColors.cardAlt,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AppColors.borderStrong),
-          ),
-          child: const Column(children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              ShimmerBox(width: 70, height: 20, radius: 999),
-              ShimmerBox(width: 90, height: 11, radius: 4),
-            ]),
-            SizedBox(height: 14),
-            Row(children: [
-              Expanded(child: Column(children: [ShimmerBox(width: 32, height: 32, radius: 16), ShimmerBox(width: 70, height: 12, radius: 4, margin: EdgeInsets.only(top: 6))])),
-              SizedBox(width: 12),
-              ShimmerBox(width: 20, height: 12, radius: 4),
-              SizedBox(width: 12),
-              Expanded(child: Column(children: [ShimmerBox(width: 32, height: 32, radius: 16), ShimmerBox(width: 70, height: 12, radius: 4, margin: EdgeInsets.only(top: 6))])),
-            ]),
-            SizedBox(height: 14),
-            Divider(height: 0.5, thickness: 0.5, color: AppColors.border),
-            SizedBox(height: 12),
-            FractionallySizedBox(widthFactor: 0.7, alignment: Alignment.centerLeft, child: ShimmerBox(height: 11, radius: 4)),
-          ]),
-        );
-
-    return ShimmerGroup(
+    final p = context.palette;
+    Widget band() => Container(height: 36, color: p.canvas);
+    return ListView(
       key: const ValueKey('matches_shimmer'),
-      child: ListView(
-        physics: const NeverScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-        children: [
-          for (var s = 0; s < 2; s++) ...[
-            const Padding(
-              padding: EdgeInsets.fromLTRB(4, 18, 4, 8),
-              child: Align(alignment: Alignment.centerLeft, child: ShimmerBox(width: 180, height: 11, radius: 4)),
-            ),
-            for (var i = 0; i < 3; i++) card(),
-          ],
-        ],
-      ),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        for (var s = 0; s < 2; s++) ...[band(), for (var i = 0; i < 3; i++) ColoredBox(color: p.surface, child: const SkeletonMatchRow())],
+      ],
     );
   }
 }

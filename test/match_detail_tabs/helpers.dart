@@ -1,12 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crickbex/core/api/api_client.dart';
 import 'package:crickbex/core/api/json.dart';
 import 'package:crickbex/core/services/cricket_services.dart';
+import 'package:crickbex/core/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import '../support/sbx1_server.dart';
 
 JsonMap fixture(String name) => J.map(jsonDecode(File('test/fixtures/$name.json').readAsStringSync()));
 
@@ -20,19 +21,18 @@ List<String> installService(Route route) {
     calls.add(req.url.path);
     return route(req) ?? http.Response(jsonEncode({'message': 'not found'}), 404);
   });
-  MatchService.instance = MatchService(
-    ApiClient(client: mock, baseUrl: 'http://test', apiKey: 'k', retryDelays: const []),
-  );
+  MatchService.instance = MatchService(testClient(mock, baseUrl: 'http://test', retryDelays: const []));
   return calls;
 }
 
-http.Response okJson(Object body) => http.Response.bytes(utf8.encode(jsonEncode(body)), 200,
-    headers: {'content-type': 'application/json'});
+http.Response okJson(Object body) => http.Response.bytes(utf8.encode(jsonEncode(body)), 200, headers: {'content-type': 'application/json'});
 
 http.Response serverError() => http.Response(jsonEncode({'message': 'Boom'}), 500);
 
-/// Bounded-height host (like a TabBarView / Expanded).
-Widget host(Widget child) => MaterialApp(home: Scaffold(body: child));
+/// Tab content inside the page scroll view (how the Match Centre hosts it).
+Widget host(Widget child, {Brightness brightness = Brightness.light}) => MaterialApp(
+  theme: buildAppTheme(brightness: brightness),
+  home: Scaffold(body: SingleChildScrollView(padding: const EdgeInsets.symmetric(horizontal: 16), child: child)),
+);
 
-/// Unbounded-height host (tab content inside the page scroll view, as in RN).
-Widget scrollHost(Widget child) => MaterialApp(home: Scaffold(body: SingleChildScrollView(child: child)));
+Widget scrollHost(Widget child) => host(child);

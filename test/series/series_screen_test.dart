@@ -25,14 +25,15 @@ void main() {
     final api = await pumpScreen(tester, (req) => gate.future);
     await tester.pump();
     expect(find.byKey(const ValueKey('series_shimmer')), findsOneWidget);
-    expect(find.text('SERIES'), findsOneWidget);
-    expect(find.text('Current'), findsOneWidget);
-    expect(find.text('Archive'), findsOneWidget);
+    expect(find.text('Series'), findsOneWidget);
+    expect(find.text('Ongoing'), findsOneWidget);
+    expect(find.text('Completed'), findsOneWidget);
     gate.complete(jsonResponse(seriesPage('ONGOING', 0, 5)));
     await settleNetwork(tester);
     expect(find.byKey(const ValueKey('series_shimmer')), findsNothing);
     expect(find.text('ONGOING Series 0'), findsOneWidget);
-    expect(find.text('LIVE'), findsWidgets);
+    expect(find.text('LIVE'), findsNothing, reason: 'no all-caps status labels');
+    expect(find.text('2026'), findsOneWidget, reason: 'year group header');
     expect(api.requests.single.queryParameters['status'], 'ONGOING');
     // other tabs are not fetched until shown
     expect(api.count((u) => u.queryParameters['status'] != 'ONGOING'), 0);
@@ -42,21 +43,29 @@ void main() {
     await pumpScreen(tester, (req) => jsonResponse(fixtureJson('series_list.json')));
     await settleNetwork(tester);
     expect(find.text('Mens Cricket World Cup 2027'), findsOneWidget);
-    expect(find.text('UPCOMING'), findsWidgets);
+    expect(find.text('UPCOMING'), findsNothing);
+    expect(find.text('Popular'), findsWidgets, reason: 'provider isPopular flag');
+    expect(find.text('2027'), findsOneWidget);
   });
 
   testWidgets('empty state', (tester) async {
     await pumpScreen(tester, (req) => jsonResponse({'message': 'ok', 'data': []}));
     await settleNetwork(tester);
-    expect(find.text('No series in this section'), findsOneWidget);
+    expect(find.text('No series in progress right now'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('series_empty_action_ONGOING')));
+    await settleNetwork(tester, 12);
+    expect(find.text('No upcoming series listed'), findsOneWidget, reason: 'empty Ongoing points to Upcoming');
   });
 
   testWidgets('error state + Try Again recovers', (tester) async {
     var fail = true;
     final api = await pumpScreen(
-        tester, (req) => fail ? jsonResponse({'message': 'Server exploded'}, 500) : jsonResponse(seriesPage('ONGOING', 0, 3)));
+      tester,
+      (req) => fail ? jsonResponse({'message': 'Server exploded'}, 500) : jsonResponse(seriesPage('ONGOING', 0, 3)),
+    );
     await settleNetwork(tester);
     expect(find.text('Server exploded'), findsOneWidget);
+    expect(find.text("Series didn't load"), findsOneWidget);
     fail = false;
     await tester.tap(find.byKey(const ValueKey('series_retry')));
     await settleNetwork(tester);
@@ -171,7 +180,7 @@ void main() {
       return jsonResponse(seriesPage('ONGOING', (page - 1) * 2, 2, total: 4, perPage: 2, page: page));
     });
     await settleNetwork(tester, 10);
-    expect(find.text('Page 2 failed'), findsOneWidget);
+    expect(find.textContaining('Page 2 failed'), findsOneWidget);
     expect(find.text('ONGOING Series 0'), findsOneWidget); // first page kept
     // the failed page is not retried automatically
     expect(api.count((u) => u.queryParameters['page'] == '2'), 1);
@@ -179,7 +188,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('series_load_more_retry')));
     await settleNetwork(tester);
     expect(find.text('ONGOING Series 3'), findsOneWidget);
-    expect(find.text('Page 2 failed'), findsNothing);
+    expect(find.textContaining('Page 2 failed'), findsNothing);
   });
 
   testWidgets('very long names and missing dates do not overflow', (tester) async {

@@ -134,7 +134,7 @@ void main() {
       await c.load(SeriesView.fixtures);
       await c.load(SeriesView.fixtures);
       expect(api.requests.single.path, '/series/S1');
-      expect(c.state(SeriesView.fixtures).data, isA<List<SeriesFixture>>());
+      expect(c.state(SeriesView.fixtures).data, isA<SeriesFixturesData>());
       await c.load(SeriesView.squads);
       expect(c.squadCount, 2);
       await c.load(SeriesView.points);
@@ -145,9 +145,11 @@ void main() {
     });
 
     test('404 → coming soon (no error); 500 → error message', () async {
-      final api = FakeApi((req) => req.url.path.endsWith('/stats')
-          ? jsonResponse({'message': 'Not found'}, 404)
-          : jsonResponse({'message': "Series doesn't exist"}, 400));
+      final api = FakeApi(
+        (req) => req.url.path.endsWith('/stats')
+            ? jsonResponse({'message': 'Not found'}, 404)
+            : jsonResponse({'message': "Series doesn't exist"}, 400),
+      );
       final c = SeriesDetailController(seriesId: 'S1', service: api.service);
       await c.load(SeriesView.stats);
       expect(c.state(SeriesView.stats).error, isNull);
@@ -172,7 +174,7 @@ void main() {
       await c.load(SeriesView.fixtures);
       slow.complete(jsonResponse(fixtureJson('series_fixtures.json')));
       await f;
-      expect(c.state(SeriesView.fixtures).data, isEmpty);
+      expect((c.state(SeriesView.fixtures).data as SeriesFixturesData).matches, isEmpty);
       expect(c.state(SeriesView.fixtures).loading, isFalse);
     });
 

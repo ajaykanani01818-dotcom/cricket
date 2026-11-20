@@ -83,4 +83,5 @@ class VisiblePoller with WidgetsBindingObserver {
 /// is the top-most one. Registers dependencies, so call it from
 /// didChangeDependencies/build to be notified when it changes.
 bool isScreenVisible(BuildContext context) =>
-    TickerMode.valuesOf(context).enabled && (ModalRoute.of(context)?.isCurrent ?? true);
+    TickerMode.valuesOf(context).enabled &&
+    (ModalRoute.of(context)?.isCurrent ?? true);

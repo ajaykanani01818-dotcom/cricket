@@ -56,7 +56,10 @@ class SeriesTabController extends ChangeNotifier {
       if (_disposed || gen != _gen) return;
       final list = parseSeriesList(res.data);
       final seen = <String>{};
-      items = [for (final s in list) if (seen.add(s.id)) s];
+      items = [
+        for (final s in list)
+          if (seen.add(s.id)) s,
+      ];
       _page = 1;
       hasMore = _computeHasMore(res, 1, list.length);
       fetched = true;
@@ -86,7 +89,10 @@ class SeriesTabController extends ChangeNotifier {
       if (_disposed || gen != _gen) return;
       final list = parseSeriesList(res.data);
       final seen = {for (final s in items) s.id};
-      final fresh = [for (final s in list) if (seen.add(s.id)) s];
+      final fresh = [
+        for (final s in list)
+          if (seen.add(s.id)) s,
+      ];
       items = [...items, ...fresh];
       _page = nextPage;
       // A page with nothing new means the server is repeating itself — stop.
@@ -113,8 +119,8 @@ class SeriesTabController extends ChangeNotifier {
   }
 }
 
-/// Series detail sub-views, in pager order (RN VIEW_ORDER).
-enum SeriesView { fixtures, points, stats, squads }
+/// Series hub tabs, in pager order: Fixtures, Points table, Squads, Stats.
+enum SeriesView { fixtures, points, squads, stats }
 
 class SeriesViewState {
   Object? data; // parsed view-model
@@ -158,25 +164,25 @@ class SeriesDetailController extends ChangeNotifier {
   }
 
   Future<ApiResponse> _fetch(SeriesView v) => switch (v) {
-        SeriesView.fixtures => _svc.getSeriesFixtures(seriesId),
-        SeriesView.points => _svc.getSeriesPointsTable(seriesId),
-        SeriesView.stats => _svc.getSeriesStats(seriesId),
-        SeriesView.squads => _svc.getSeriesSquads(seriesId),
-      };
+    SeriesView.fixtures => _svc.getSeriesFixtures(seriesId),
+    SeriesView.points => _svc.getSeriesPointsTable(seriesId),
+    SeriesView.stats => _svc.getSeriesStats(seriesId),
+    SeriesView.squads => _svc.getSeriesSquads(seriesId),
+  };
 
   Object _parse(SeriesView v, dynamic data) => switch (v) {
-        SeriesView.fixtures => parseSeriesFixtures(data, seriesTitle: seriesName),
-        SeriesView.points => parsePointsTable(data),
-        SeriesView.stats => parseSeriesStats(data),
-        SeriesView.squads => parseSquads(data),
-      };
+    SeriesView.fixtures => parseSeriesFixtures(data),
+    SeriesView.points => parsePointsTable(data),
+    SeriesView.stats => parseSeriesStats(data),
+    SeriesView.squads => parseSquads(data),
+  };
 
   Object _comingSoon(SeriesView v) => switch (v) {
-        SeriesView.fixtures => const <SeriesFixture>[],
-        SeriesView.points => const <PointsGroup>[],
-        SeriesView.stats => const SeriesStatsData(comingSoon: true),
-        SeriesView.squads => const <SquadTeam>[],
-      };
+    SeriesView.fixtures => const SeriesFixturesData([]),
+    SeriesView.points => const <PointsGroup>[],
+    SeriesView.stats => const SeriesStatsData(comingSoon: true),
+    SeriesView.squads => const <SquadTeam>[],
+  };
 
   Future<void> load(SeriesView v, {bool force = false}) async {
     if (seriesId.isEmpty) return;

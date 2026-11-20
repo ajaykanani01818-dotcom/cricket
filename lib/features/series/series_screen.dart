@@ -1,18 +1,20 @@
 import 'package:flutter/material.dart';
 
+import '../../core/motion/motion.dart';
 import '../../core/router/app_nav.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/widgets/pressable.dart';
+import '../../core/widgets/cards.dart';
 import '../../core/widgets/tabs.dart';
 import '../../core/widgets/titles.dart';
 import '../ads/ads.dart';
+import '../matches/feature_states.dart';
 import 'series_controllers.dart';
 import 'series_models.dart';
 import 'series_shimmers.dart';
 
-/// Ported from RN `SeriesScreen.tsx`: Current / Upcoming / Archive swipeable
-/// tabs of series cards. Each tab loads lazily the first time it is shown,
-/// then pages in more series on scroll (infinite scroll, stops at last page).
+/// Series list (Discover → Series): Ongoing / Upcoming / Completed pages,
+/// grouped by year, flat rows. Each page loads the first time it is shown,
+/// then pages in more series on scroll (stops at the last page).
 class SeriesScreen extends StatefulWidget {
   const SeriesScreen({super.key});
 
@@ -20,11 +22,10 @@ class SeriesScreen extends StatefulWidget {
   State<SeriesScreen> createState() => _SeriesScreenState();
 }
 
-const _tabItems = [
-  SectionTabItem('ONGOING', 'Current'),
-  SectionTabItem('UPCOMING', 'Upcoming'),
-  SectionTabItem('COMPLETED', 'Archive'),
-];
+const _tabItems = [SectionTabItem('ONGOING', 'Ongoing'), SectionTabItem('UPCOMING', 'Upcoming'), SectionTabItem('COMPLETED', 'Completed')];
+
+/// Max content width on tablets and desktop.
+const kSeriesMaxWidth = 720.0;
 
 class _SeriesScreenState extends State<SeriesScreen> {
   final _pageController = PageController();
@@ -61,7 +62,7 @@ class _SeriesScreenState extends State<SeriesScreen> {
     if (_pageController.hasClients) {
       _animatingTo = i;
       _pageController
-          .animateToPage(i, duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic)
+          .animateToPage(i, duration: Motion.of(context).d(Motion.tabSwitch), curve: Motion.standard)
           .whenComplete(() => _animatingTo = null);
     }
   }
@@ -85,36 +86,78 @@ class _SeriesScreenState extends State<SeriesScreen> {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.bg,
-      child: Column(children: [
-        const ScreenTitle(title: 'Series'),
-        const ScreenBannerSlots(screen: 'series', onlyPosition: 'top'),
-        SectionTabs(tabs: _tabItems, activeKey: _tabItems[_index].key, onSelect: _onTabTap),
-        Expanded(
-          child: PageView.builder(
-            key: const ValueKey('series_pager'),
-            controller: _pageController,
-            itemCount: _tabItems.length,
-            onPageChanged: _onPageChanged,
-            itemBuilder: (_, i) => _SeriesTabPage(
-              key: ValueKey('series_page_${_tabItems[i].key}'),
-              tabKey: _tabItems[i].key,
-              controller: _controllers[i],
-              onSeriesPress: _openSeries,
+      color: context.palette.canvas,
+      child: Column(
+        children: [
+          const ScreenTitle(title: 'Series'),
+          const ScreenBannerSlots(screen: 'series', onlyPosition: 'top'),
+          MaxWidthBand(
+            child: SectionTabs(tabs: _tabItems, activeKey: _tabItems[_index].key, onSelect: _onTabTap),
+          ),
+          Expanded(
+            child: PageView.builder(
+              key: const ValueKey('series_pager'),
+              controller: _pageController,
+              itemCount: _tabItems.length,
+              onPageChanged: _onPageChanged,
+              itemBuilder: (_, i) => _SeriesTabPage(
+                key: ValueKey('series_page_${_tabItems[i].key}'),
+                tabKey: _tabItems[i].key,
+                controller: _controllers[i],
+                onSeriesPress: _openSeries,
+                onShowTab: _onTabTap,
+              ),
             ),
           ),
-        ),
-        const FixedBottomBanner(screen: 'series'),
-      ]),
+          const FixedBottomBanner(screen: 'series'),
+        ],
+      ),
     );
   }
 }
 
+sealed class _Row {
+  const _Row();
+}
+
+class _YearRow extends _Row {
+  const _YearRow(this.label);
+  final String label;
+}
+
+class _ItemRow extends _Row {
+  const _ItemRow(this.item);
+  final SeriesItem item;
+}
+
+class _AdRow extends _Row {
+  const _AdRow(this.n);
+  final int n;
+}
+
+/// Year headers whenever the year changes, a native ad slot every
+/// [kSeriesNativeAdInterval] series (collapses to nothing without ads).
+List<_Row> _buildRows(List<SeriesItem> items) {
+  final rows = <_Row>[];
+  Object? year = const Object();
+  for (var i = 0; i < items.length; i++) {
+    final it = items[i];
+    if (it.year != year) {
+      year = it.year;
+      rows.add(_YearRow(it.year?.toString() ?? 'Dates to be announced'));
+    }
+    if (i > 0 && i % kSeriesNativeAdInterval == 0) rows.add(_AdRow(i));
+    rows.add(_ItemRow(it));
+  }
+  return rows;
+}
+
 class _SeriesTabPage extends StatefulWidget {
-  const _SeriesTabPage({super.key, required this.tabKey, required this.controller, required this.onSeriesPress});
+  const _SeriesTabPage({super.key, required this.tabKey, required this.controller, required this.onSeriesPress, required this.onShowTab});
   final String tabKey;
   final SeriesTabController controller;
   final ValueChanged<SeriesItem> onSeriesPress;
+  final ValueChanged<String> onShowTab;
 
   @override
   State<_SeriesTabPage> createState() => _SeriesTabPageState();
@@ -123,17 +166,19 @@ class _SeriesTabPage extends StatefulWidget {
 class _SeriesTabPageState extends State<_SeriesTabPage> with AutomaticKeepAliveClientMixin {
   SeriesTabController get c => widget.controller;
   int _checkedLength = -1;
+  List<SeriesItem>? _rowsFor;
+  List<_Row> _rows = const [];
 
   @override
   bool get wantKeepAlive => true;
 
   bool _onScroll(ScrollNotification n) {
-    // After a failed page only the footer's Try Again retries (no retry storm while scrolling).
+    // After a failed page only the footer's Try again retries.
     if (n.metrics.axis == Axis.vertical && n.metrics.extentAfter < 600 && c.loadMoreError == null) c.loadMore();
     return false;
   }
 
-  /// If the first page does not fill the viewport there is no scroll to trigger
+  /// A first page that does not fill the viewport has no scroll to trigger
   /// load-more, so check once after layout per list length.
   void _scheduleFillCheck(BuildContext listContext) {
     if (_checkedLength == c.items.length) return;
@@ -149,75 +194,106 @@ class _SeriesTabPageState extends State<_SeriesTabPage> with AutomaticKeepAliveC
     await c.refresh();
     if (!mounted) return;
     if (c.error != null && c.items.isNotEmpty) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(c.error!)));
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text("Series didn't refresh. ${c.error!}")));
     }
+  }
+
+  Widget _empty() {
+    final (String, String, String, VoidCallback) copy = switch (widget.tabKey) {
+      'ONGOING' => (
+        'No series in progress right now',
+        'See which series start next in Upcoming.',
+        'See upcoming',
+        () => widget.onShowTab('UPCOMING'),
+      ),
+      'UPCOMING' => (
+        'No upcoming series listed',
+        'New series show up here once they are announced. Pull down to check again.',
+        'Refresh',
+        _refresh,
+      ),
+      _ => ('No completed series yet', 'Finished series show up here. Pull down to check again.', 'Refresh', _refresh),
+    };
+    final (title, body, action, onAction) = copy;
+    return StateMessage(
+      icon: Icons.emoji_events_outlined,
+      title: title,
+      body: body,
+      actionLabel: action,
+      actionKey: ValueKey('series_empty_action_${widget.tabKey}'),
+      onAction: onAction,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final bottomPad = MediaQuery.paddingOf(context).bottom + Spacing.lg;
+    final p = context.palette;
     return ListenableBuilder(
       listenable: c,
       builder: (context, _) {
-        if (c.showShimmer) return SeriesShimmer(bottomPadding: bottomPad);
+        if (c.showShimmer) return const SeriesShimmer();
         if (c.error != null && c.items.isEmpty) {
-          return _SeriesErrorCard(message: c.error!, onRetry: () => c.load(force: true));
+          return ListView(
+            children: [
+              ErrorMessage(
+                title: "Series didn't load",
+                reason: c.error!,
+                onRetry: () => c.load(force: true),
+                retryKey: const ValueKey('series_retry'),
+              ),
+            ],
+          );
         }
         if (c.items.isEmpty) {
           return RefreshIndicator(
-            color: AppColors.pitch,
+            color: p.brandText,
             onRefresh: _refresh,
             child: ListView(
               key: ValueKey('series_empty_${widget.tabKey}'),
               physics: const AlwaysScrollableScrollPhysics(),
-              children: const [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(Spacing.lg, 40 + 60, Spacing.lg, 0),
-                  child: Text('No series in this section',
-                      textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
-                ),
-              ],
+              children: [_empty()],
             ),
           );
         }
-        // Rows: series cards with a native ad every N cards (RN listData).
-        final items = c.items;
-        final adCount = (items.length - 1) ~/ kSeriesNativeAdInterval;
-        final rowCount = items.length + adCount;
+        if (!identical(_rowsFor, c.items)) {
+          _rowsFor = c.items;
+          _rows = _buildRows(c.items);
+        }
+        final rows = _rows;
         final footer = c.loadingMore || c.loadMoreError != null;
-        return RefreshIndicator(
-          color: AppColors.pitch,
-          onRefresh: _refresh,
-          child: NotificationListener<ScrollNotification>(
-            onNotification: _onScroll,
-            child: ListView.builder(
-              key: ValueKey('series_list_${widget.tabKey}'),
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: EdgeInsets.fromLTRB(Spacing.lg, 14, Spacing.lg, bottomPad),
-              itemCount: rowCount + (footer ? 1 : 0),
-              itemBuilder: (context, row) {
-                if (row == 0) _scheduleFillCheck(context);
-                if (row >= rowCount) return _footer();
-                // Row r maps to item i where every (interval+1)th row after the first group is an ad.
-                final group = kSeriesNativeAdInterval + 1;
-                if (row >= kSeriesNativeAdInterval && (row - kSeriesNativeAdInterval) % group == 0) {
-                  return Padding(
-                    key: ValueKey('series_ad_${widget.tabKey}_$row'),
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: const ListNativeAd(placement: 'series_list'),
-                  );
-                }
-                final adsBefore = row < kSeriesNativeAdInterval ? 0 : (row - kSeriesNativeAdInterval) ~/ group + 1;
-                final item = items[row - adsBefore];
-                return Padding(
-                  key: ValueKey('series_row_${item.id}'),
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: SeriesCard(item: item, onTap: () => widget.onSeriesPress(item)),
-                );
-              },
-            ),
-          ),
+        return LayoutBuilder(
+          builder: (context, box) {
+            final side = box.maxWidth > kSeriesMaxWidth ? (box.maxWidth - kSeriesMaxWidth) / 2 : 0.0;
+            return RefreshIndicator(
+              color: p.brandText,
+              onRefresh: _refresh,
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _onScroll,
+                child: ListView.builder(
+                  key: ValueKey('series_list_${widget.tabKey}'),
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: EdgeInsets.fromLTRB(side, 0, side, Spacing.lg),
+                  itemCount: rows.length + (footer ? 1 : 0),
+                  itemBuilder: (context, i) {
+                    if (i == 0) _scheduleFillCheck(context);
+                    if (i >= rows.length) return _footer();
+                    return switch (rows[i]) {
+                      _YearRow(:final label) => _YearHeader(label: label),
+                      _AdRow(:final n) => KeyedSubtree(
+                        key: ValueKey('series_ad_${widget.tabKey}_$n'),
+                        child: const ListNativeAd(placement: 'series_list'),
+                      ),
+                      _ItemRow(:final item) => KeyedSubtree(
+                        key: ValueKey('series_row_${item.id}'),
+                        child: SeriesCard(item: item, onTap: () => widget.onSeriesPress(item)),
+                      ),
+                    };
+                  },
+                ),
+              ),
+            );
+          },
         );
       },
     );
@@ -225,148 +301,110 @@ class _SeriesTabPageState extends State<_SeriesTabPage> with AutomaticKeepAliveC
 
   Widget _footer() {
     if (c.loadingMore) {
-      return const Padding(
-        key: ValueKey('series_load_more_spinner'),
-        padding: EdgeInsets.symmetric(vertical: Spacing.lg),
-        child: Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5))),
+      return Padding(
+        key: const ValueKey('series_load_more_spinner'),
+        padding: const EdgeInsets.symmetric(vertical: Spacing.lg),
+        child: Center(
+          child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: context.palette.brandText)),
+        ),
       );
     }
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Spacing.md),
-      child: Column(children: [
-        Text(c.loadMoreError ?? '', textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: AppColors.error)),
-        TextButton(
-          key: const ValueKey('series_load_more_retry'),
-          onPressed: c.loadMore,
-          child: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.w700, color: AppColors.pitch)),
-        ),
-      ]),
+      padding: const EdgeInsets.symmetric(vertical: Spacing.md, horizontal: Spacing.lg),
+      child: Column(
+        children: [
+          Text(
+            "More series didn't load. ${c.loadMoreError ?? ''}",
+            textAlign: TextAlign.center,
+            style: AppText.meta.copyWith(color: context.palette.negative),
+          ),
+          TextButton(key: const ValueKey('series_load_more_retry'), onPressed: c.loadMore, child: const Text('Try again')),
+        ],
+      ),
     );
   }
 }
 
-class _SeriesErrorCard extends StatelessWidget {
-  const _SeriesErrorCard({required this.message, required this.onRetry});
-  final String message;
-  final VoidCallback onRetry;
+class _YearHeader extends StatelessWidget {
+  const _YearHeader({required this.label});
+  final String label;
 
   @override
-  Widget build(BuildContext context) => ListView(
-        padding: const EdgeInsets.fromLTRB(Spacing.lg, 40, Spacing.lg, 0),
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 28, horizontal: Spacing.xxl),
-            decoration: BoxDecoration(
-              color: AppColors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: AppColors.borderStrong),
-            ),
-            child: Column(children: [
-              Text(message, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: AppColors.error)),
-              const SizedBox(height: 14),
-              Pressable(
-                key: const ValueKey('series_retry'),
-                onTap: onRetry,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 11),
-                  decoration: BoxDecoration(color: AppColors.text, borderRadius: BorderRadius.circular(Radii.md)),
-                  child: const Text('Try Again',
-                      style: TextStyle(color: AppColors.white, fontWeight: FontWeight.w700, fontSize: 13, letterSpacing: 0.3)),
-                ),
-              ),
-            ]),
-          ),
-        ],
-      );
+  Widget build(BuildContext context) => Semantics(
+    header: true,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(Spacing.lg, Spacing.lg, Spacing.lg, Spacing.sm),
+      child: Text(
+        label,
+        style: AppFont.style(size: 14, weight: FontWeight.w700, color: context.palette.inkMuted, tabularFigures: true),
+      ),
+    ),
+  );
 }
 
-/// Ported from RN `SeriesCard`.
+/// One series: name, date range, format and the provider's popular flag.
 class SeriesCard extends StatelessWidget {
   const SeriesCard({super.key, required this.item, required this.onTap});
   final SeriesItem item;
   final VoidCallback onTap;
 
-  static const _statusLabel = {
-    SeriesStatusKey.ongoing: 'LIVE',
-    SeriesStatusKey.upcoming: 'UPCOMING',
-    SeriesStatusKey.completed: 'COMPLETED',
-  };
-  static const _statusColor = {
-    SeriesStatusKey.ongoing: AppColors.live,
-    SeriesStatusKey.upcoming: AppColors.textSecondary,
-    SeriesStatusKey.completed: AppColors.win,
-  };
-
   @override
   Widget build(BuildContext context) {
-    final status = item.status;
-    final isLive = item.isLive;
+    final p = context.palette;
+    final name = item.name.isEmpty ? 'Unnamed series' : item.name;
+    final meta = <Widget>[
+      if (item.dateRange.isNotEmpty) Text(item.dateRange, style: AppText.meta.copyWith(fontFeatures: const [FontFeature.tabularFigures()])),
+      if (item.format.isNotEmpty) FormatChip(item.format),
+      if (item.isPopular)
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.star_rounded, size: 16, color: p.brandText),
+            const SizedBox(width: 2),
+            Text('Popular', style: AppText.small.copyWith(color: p.brandText)),
+          ],
+        ),
+    ];
+    final label = [
+      name,
+      if (item.dateRange.isNotEmpty) item.dateRange,
+      if (item.format.isNotEmpty) item.format,
+      if (item.isPopular) 'popular',
+    ].join(', ');
     return Semantics(
       button: true,
-      label: item.name,
-      child: Pressable(
-        key: ValueKey('series_card_${item.id}'),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: Spacing.lg, vertical: 14),
-          decoration: BoxDecoration(
-            color: isLive ? AppColors.redTint : AppColors.white,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AppColors.borderStrong),
-            boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 12, offset: Offset(0, 4))],
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              if (item.format.isNotEmpty) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 3),
-                  decoration: BoxDecoration(color: AppColors.cardAlt, borderRadius: BorderRadius.circular(Radii.full)),
-                  child: Text(item.format,
-                      style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.graphite, letterSpacing: 0.3)),
-                ),
-                const SizedBox(width: Spacing.sm),
-              ],
-              if (status != null) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: Spacing.sm, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: isLive ? AppColors.pitch : AppColors.cardAlt,
-                    borderRadius: BorderRadius.circular(Radii.full),
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    if (isLive) ...[
-                      Container(width: 5, height: 5, decoration: const BoxDecoration(color: AppColors.white, shape: BoxShape.circle)),
-                      const SizedBox(width: Spacing.xs),
-                    ],
-                    Text(_statusLabel[status]!,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.5,
-                          color: isLive ? AppColors.white : _statusColor[status],
-                        )),
-                  ]),
-                ),
-                const SizedBox(width: Spacing.sm),
-              ],
-              Expanded(
-                child: Text(
-                  item.dateRange,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary, letterSpacing: 0.1),
-                ),
-              ),
-            ]),
-            const SizedBox(height: Spacing.sm),
-            Text(
-              item.name,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.text, height: 22 / 16, letterSpacing: -0.2),
+      label: label,
+      excludeSemantics: true,
+      child: Material(
+        color: p.surface,
+        child: InkWell(
+          key: ValueKey('series_card_${item.id}'),
+          onTap: onTap,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 56),
+            padding: const EdgeInsets.symmetric(horizontal: Spacing.lg, vertical: Spacing.md),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: p.hairline)),
             ),
-          ]),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: AppFont.withWeight(AppText.name, FontWeight.w700)),
+                      if (meta.isNotEmpty) ...[
+                        const SizedBox(height: Spacing.xs),
+                        Wrap(spacing: Spacing.sm, runSpacing: Spacing.xs, crossAxisAlignment: WrapCrossAlignment.center, children: meta),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: Spacing.sm),
+                Icon(Icons.chevron_right, color: p.inkMuted),
+              ],
+            ),
+          ),
         ),
       ),
     );

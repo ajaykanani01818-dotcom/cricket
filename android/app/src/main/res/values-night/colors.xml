@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="splash_background">#17130F</color>
+    <color name="app_canvas">#17130F</color>
+</resources>

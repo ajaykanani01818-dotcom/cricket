@@ -70,7 +70,10 @@ class MinuteClock extends ChangeNotifier {
   void addListener(VoidCallback listener) {
     super.addListener(listener);
     _listeners++;
-    _timer ??= Timer.periodic(const Duration(minutes: 1), (_) => notifyListeners());
+    _timer ??= Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => notifyListeners(),
+    );
   }
 
   @override

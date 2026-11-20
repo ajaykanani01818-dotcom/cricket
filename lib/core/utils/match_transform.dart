@@ -55,14 +55,18 @@ bool _hasScore(String? s) {
   return t != null && t.isNotEmpty && t != '-';
 }
 
-String matchIdOf(JsonMap m) => J.text(m['sb_match_key']) ?? J.text(m['_id']) ?? J.str(m['key']);
+String matchIdOf(JsonMap m) =>
+    J.text(m['sb_match_key']) ?? J.text(m['_id']) ?? J.str(m['key']);
 
 bool deriveIsLive(JsonMap m) {
   final status = J.str(m['status']).toUpperCase();
   final has1 = _hasScore(J.str(J.at(m, 'teams.t1.score')));
   final has2 = _hasScore(J.str(J.at(m, 'teams.t2.score')));
   final single = (has1 && !has2) || (has2 && !has1);
-  return status == 'LIVE' || status == 'IN_PROGRESS' || status.contains('LIVE') || (single && J.str(m['status']) != 'COMPLETED');
+  return status == 'LIVE' ||
+      status == 'IN_PROGRESS' ||
+      status.contains('LIVE') ||
+      (single && J.str(m['status']) != 'COMPLETED');
 }
 
 MatchSummary transformApiMatch(JsonMap m) {
@@ -78,13 +82,19 @@ MatchSummary transformApiMatch(JsonMap m) {
   if (resultMsg != null) {
     status = resultMsg;
   } else if (isLive && _hasScore(t1Score) && !_hasScore(t2Score)) {
-    final chase = currentInning.contains('t2') || RegExp(r'/10\b').hasMatch(t1Score);
+    final chase =
+        currentInning.contains('t2') || RegExp(r'/10\b').hasMatch(t1Score);
     final runs = t1Score.split('/').first.trim();
-    status = chase ? '${J.text(t2['name']) ?? 'They'} need $runs runs' : '${J.text(t2['name']) ?? 'They'} yet to bat';
+    status = chase
+        ? '${J.text(t2['name']) ?? 'They'} need $runs runs'
+        : '${J.text(t2['name']) ?? 'They'} yet to bat';
   } else if (isLive && _hasScore(t2Score) && !_hasScore(t1Score)) {
-    final chase = currentInning.contains('t1') || RegExp(r'/10\b').hasMatch(t2Score);
+    final chase =
+        currentInning.contains('t1') || RegExp(r'/10\b').hasMatch(t2Score);
     final runs = t2Score.split('/').first.trim();
-    status = chase ? '${J.text(t1['name']) ?? 'They'} need $runs runs' : '${J.text(t1['name']) ?? 'They'} yet to bat';
+    status = chase
+        ? '${J.text(t1['name']) ?? 'They'} need $runs runs'
+        : '${J.text(t1['name']) ?? 'They'} yet to bat';
   } else if (!_hasScore(t1Score) && !_hasScore(t2Score)) {
     status = 'Match starting soon';
   }
@@ -126,4 +136,5 @@ MatchSummary transformApiMatch(JsonMap m) {
   );
 }
 
-List<MatchSummary> transformApiMatches(Iterable<JsonMap> list) => list.map(transformApiMatch).toList();
+List<MatchSummary> transformApiMatches(Iterable<JsonMap> list) =>
+    list.map(transformApiMatch).toList();

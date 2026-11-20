@@ -18,7 +18,8 @@ class AdsManager {
   AdsManager._();
   static final AdsManager instance = AdsManager._();
 
-  AdsBackend _backend = GoogleAdsBackend();
+  /// google_mobile_ads has no web implementation: ads are disabled on web.
+  AdsBackend _backend = kIsWeb ? const NoopAdsBackend() : GoogleAdsBackend();
   Clock _clock = systemClock;
   AdsConfig config = AdsConfig.defaults();
   AdUnitIds ids = resolveAdUnitIds();
@@ -55,6 +56,10 @@ class AdsManager {
   Future<bool> _doInit() async {
     try {
       await noAds.refresh();
+      if (kIsWeb) {
+        adLog('Skipping AdMob (not supported on web).');
+        return false;
+      }
       if (!config.masterEnabled) {
         adLog('Skipping AdMob (ads_master_enabled=false).');
         return false;

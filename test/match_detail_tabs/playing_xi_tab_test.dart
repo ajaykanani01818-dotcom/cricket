@@ -6,159 +6,95 @@ import 'package:http/http.dart' as http;
 
 import 'helpers.dart';
 
+http.Response? lineupRoute(http.Request r) {
+  if (r.url.path.endsWith('/playing11')) return okJson(fixture('match_playing11'));
+  if (r.url.path.endsWith('/squad')) return okJson(fixture('match_squad'));
+  return null;
+}
+
 void main() {
   final original = MatchService.instance;
   tearDown(() => MatchService.instance = original);
 
-  testWidgets('shimmer → real fixture data', (tester) async {
-    final calls = installService((r) => r.url.path == '/match/m1/playing11' ? okJson(fixture('match_playing11')) : null);
-    await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
+  testWidgets('skeleton → XI with C / WK text tags, bench from the squad; players tappable', (tester) async {
+    final calls = installService(lineupRoute);
+    String? tapped;
+    await tester.pumpWidget(host(MatchPlayingXITab(matchId: 'm1', isLive: false, onPlayerTap: (k) => tapped = k)));
     expect(find.byKey(const ValueKey('playing_xi_loading')), findsOneWidget);
     await tester.pump();
     await tester.pump();
-    expect(find.byKey(const ValueKey('playing_xi_loading')), findsNothing);
-    expect(find.text('South Africa Squad'), findsOneWidget);
-    expect(find.byKey(const ValueKey('playing_xi_player_aiden_markram')), findsOneWidget);
-    expect(find.text('Aiden Markram'), findsOneWidget);
-    expect(calls, ['/match/m1/playing11']);
-
-    // Team 2 further down the list.
-    await tester.scrollUntilVisible(find.text('Najmul Hossain Shanto'), 300);
+    expect(calls.toSet(), {'/match/m1/playing11', '/match/m1/squad'});
+    expect(find.text('South Africa'), findsOneWidget);
+    expect(find.text('Bangladesh'), findsOneWidget);
     final shanto = find.byKey(const ValueKey('playing_xi_player_najmul_hossain_shanto'));
     expect(find.descendant(of: shanto, matching: find.text('C')), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('Mushfiqur Rahim'), 300);
     final mushfiq = find.byKey(const ValueKey('playing_xi_player_mushfiqur_rahim'));
     expect(find.descendant(of: mushfiq, matching: find.text('WK')), findsOneWidget);
+    expect(find.text('Bench'), findsNWidgets(2));
+    await tester.ensureVisible(find.byKey(const ValueKey('playing_xi_player_aiden_markram')));
+    await tester.tap(find.byKey(const ValueKey('playing_xi_player_aiden_markram')));
+    expect(tapped, 'aiden_markram');
   });
 
-  testWidgets('missing match → empty state', (tester) async {
-    installService((r) => okJson({'message': 'ok', 'data': {}}));
+  testWidgets('teams side by side on wide screens', (tester) async {
+    installService(lineupRoute);
+    tester.view.physicalSize = const Size(1000, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
     await tester.pump();
     await tester.pump();
-    expect(find.text('No Playing XI data available'), findsOneWidget);
+    final a = tester.getTopLeft(find.byKey(const ValueKey('playing_xi_team1')));
+    final b = tester.getTopLeft(find.byKey(const ValueKey('playing_xi_team2')));
+    expect(a.dy, b.dy);
+    expect(b.dx, greaterThan(a.dx));
   });
 
-  testWidgets('empty team lists show "No players available"', (tester) async {
-    installService((r) => okJson({
-          'data': {
-            'match': {
-              'teams': {
-                'team1': {'name': 'India'},
-                'team2': {'name': 'Australia'},
-              },
-              'playingXI_Team1': [],
-            }
-          }
-        }));
+  testWidgets('missing match → not announced; squad failure tolerated', (tester) async {
+    installService((r) => r.url.path.endsWith('/playing11') ? okJson({'message': 'ok', 'data': {}}) : serverError());
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
     await tester.pump();
     await tester.pump();
-    expect(find.text('India Squad'), findsOneWidget);
-    expect(find.text('Australia Squad'), findsOneWidget);
-    expect(find.text('No players available'), findsNWidgets(2));
+    expect(find.byKey(const ValueKey('playing_xi_empty')), findsOneWidget);
   });
 
-  testWidgets('server error → error state; Retry recovers', (tester) async {
+  testWidgets('server error → error state; Try again recovers', (tester) async {
     var fail = true;
-    installService((r) => fail ? serverError() : okJson(fixture('match_playing11')));
+    installService((r) => fail ? serverError() : lineupRoute(r));
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const ValueKey('playing_xi_error')), findsOneWidget);
-    expect(find.text('Boom'), findsOneWidget);
-
     fail = false;
-    await tester.tap(find.byKey(const ValueKey('empty_state_action')));
+    await tester.tap(find.text('Try again'));
     await tester.pump();
     await tester.pump();
-    expect(find.text('South Africa Squad'), findsOneWidget);
+    expect(find.byKey(const ValueKey('playing_xi_team1')), findsOneWidget);
   });
 
-  testWidgets('live: polls every 15s silently, keeps data + scroll; stops on dispose', (tester) async {
-    var n = 0;
-    final calls = installService((r) {
-      n++;
-      return n == 2 ? serverError() : okJson(fixture('match_playing11'));
-    });
+  testWidgets('live: re-polls every 30 s while ticking; skips while offstage', (tester) async {
+    final calls = installService(lineupRoute);
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: true)));
     await tester.pump();
     await tester.pump();
-    expect(find.text('South Africa Squad'), findsOneWidget);
-    await tester.drag(find.byType(ListView), const Offset(0, -300));
-    await tester.pumpAndSettle();
-    final scrollable = find.byType(Scrollable).first;
-    final pos = tester.state<ScrollableState>(scrollable).position.pixels;
-    final before = tester.widget(find.byKey(const ValueKey('playing_xi_team1')));
-
-    await tester.pump(const Duration(seconds: 15)); // poll #2 fails silently
+    expect(calls.length, 2);
+    await tester.pump(const Duration(seconds: 30));
     await tester.pump();
-    expect(calls, hasLength(2));
-    expect(find.byKey(const ValueKey('playing_xi_error')), findsNothing);
-    expect(find.byKey(const ValueKey('playing_xi_loading')), findsNothing);
-
-    await tester.pump(const Duration(seconds: 15)); // poll #3, identical data
+    expect(calls.length, 4);
+    // A new (offstage) instance loads once, then its polls are skipped.
+    await tester.pumpWidget(host(const TickerMode(enabled: false, child: MatchPlayingXITab(matchId: 'm1', isLive: true))));
     await tester.pump();
-    expect(calls, hasLength(3));
-    expect(identical(tester.widget(find.byKey(const ValueKey('playing_xi_team1'))), before), isTrue);
-    expect(tester.state<ScrollableState>(scrollable).position.pixels, pos);
-
-    await tester.pumpWidget(const SizedBox());
-    await tester.pump(const Duration(seconds: 60));
-    expect(calls, hasLength(3));
-  });
-
-  testWidgets('not live: no polling', (tester) async {
-    final calls = installService((r) => okJson(fixture('match_playing11')));
-    await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 45));
-    expect(calls, hasLength(1));
-  });
-
-  testWidgets('polling skips ticks while tickers are disabled (offstage)', (tester) async {
-    final calls = installService((r) => okJson(fixture('match_playing11')));
-    Widget build(bool enabled) => host(TickerMode(
-          enabled: enabled,
-          child: const MatchPlayingXITab(matchId: 'm1', isLive: true),
-        ));
-    await tester.pumpWidget(build(true));
-    await tester.pump();
-    await tester.pumpWidget(build(false));
-    await tester.pump(const Duration(seconds: 31));
-    expect(calls, hasLength(1));
-    await tester.pumpWidget(build(true));
-    await tester.pump(const Duration(seconds: 15));
-    await tester.pump();
-    expect(calls, hasLength(2));
+    final n = calls.length;
+    await tester.pump(const Duration(minutes: 2));
+    expect(calls.length, n);
   });
 
   testWidgets('matchId change reloads for the new match', (tester) async {
-    final calls = installService((r) => okJson(fixture('match_playing11')));
+    final calls = installService(lineupRoute);
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
     await tester.pump();
     await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm2', isLive: false)));
     await tester.pump();
-    await tester.pump();
-    expect(calls, ['/match/m1/playing11', '/match/m2/playing11']);
-  });
-
-  testWidgets('works inside a parent scroll view; network failure surfaces an error', (tester) async {
-    installService((r) => okJson(fixture('match_playing11')));
-    await tester.pumpWidget(scrollHost(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
-    await tester.pump();
-    await tester.pump();
-    expect(tester.takeException(), isNull);
-    expect(find.text('Bangladesh Squad'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox());
-
-    // Network failure (MockClient throwing) → friendly message.
-    installServiceThrowing();
-    await tester.pumpWidget(host(const MatchPlayingXITab(matchId: 'm1', isLive: false)));
-    await tester.pump();
-    await tester.pump();
-    expect(find.byKey(const ValueKey('playing_xi_error')), findsOneWidget);
+    expect(calls, contains('/match/m2/playing11'));
   });
 }
-
-void installServiceThrowing() => installService((r) => throw http.ClientException('offline'));

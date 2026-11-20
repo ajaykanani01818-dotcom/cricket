@@ -37,7 +37,11 @@ class ChaseSummary {
   final int runsNeeded;
   final int? ballsRemaining;
   final String chasingTeamName;
-  const ChaseSummary(this.runsNeeded, this.ballsRemaining, this.chasingTeamName);
+  const ChaseSummary(
+    this.runsNeeded,
+    this.ballsRemaining,
+    this.chasingTeamName,
+  );
 }
 
 ChaseSummary? computeChaseSummaryForLiveList(JsonMap m) {
@@ -47,7 +51,10 @@ ChaseSummary? computeChaseSummaryForLiveList(JsonMap m) {
   if (t1s == null || t2s == null) return null;
 
   String chasing;
-  final io = J.list(m['inningsOrder']).map((e) => e.toString().toLowerCase()).toList();
+  final io = J
+      .list(m['inningsOrder'])
+      .map((e) => e.toString().toLowerCase())
+      .toList();
   final cur = J.str(m['currentInning']).toLowerCase();
   if (io.length >= 2) {
     chasing = io[1].startsWith('t2') ? 't2' : 't1';
@@ -85,7 +92,10 @@ ChaseSummary? computeChaseSummaryForLiveList(JsonMap m) {
   final chaseOvers = parseOversFromScoreParen(chaseScore);
   if (maxOvers != null && maxOvers > 0 && chaseOvers != null) {
     final maxBalls = (maxOvers * 6).round();
-    ballsRemaining = (maxBalls - oversToLegalBallsCompleted(chaseOvers)).clamp(0, 1 << 30);
+    ballsRemaining = (maxBalls - oversToLegalBallsCompleted(chaseOvers)).clamp(
+      0,
+      1 << 30,
+    );
   }
   final name = J.text(J.at(m, 'teams.$chasing.name')) ?? 'Team';
   return ChaseSummary(runsNeeded, ballsRemaining, name);
